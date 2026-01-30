@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
-import { useMeasure } from "react-use-measure";
+import useMeasure from "react-use-measure";
 
 export function TerminalView() {
     const terminalRef = useRef<HTMLDivElement>(null);
