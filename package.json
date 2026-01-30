@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "setup": "bun install && node scripts/setup-env.mjs && bunx convex dev"
   },
   "dependencies": {
     "@base-ui/react": "^1.1.0",

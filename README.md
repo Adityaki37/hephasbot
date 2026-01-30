@@ -2,17 +2,19 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
-First, run the development server:
+## Getting Started
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+1. **Install Dependencies & Setup Environment**
+   Run the setup script to install dependencies, set up the Python environment, and configure environment variables.
+   ```bash
+   bun run setup
+   ```
+   *Note: You will need to provide your WorkOS and Convex credentials in `.env.local` if they are not automatically configured.*
+
+2. **Run the Development Server**
+   ```bash
+   bun run dev
+   ```
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 

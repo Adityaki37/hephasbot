@@ -37,6 +37,16 @@ function runCommand(command, args, cwd = PROJECT_ROOT) {
 
 async function setup() {
     try {
+        // 0. Setup .env.local
+        const envPath = path.join(PROJECT_ROOT, '.env.local');
+        const exampleEnvPath = path.join(PROJECT_ROOT, '.env.local.example');
+
+        if (!fs.existsSync(envPath) && fs.existsSync(exampleEnvPath)) {
+            console.log('📝 Creating .env.local from example...');
+            fs.copyFileSync(exampleEnvPath, envPath);
+            console.log('⚠️  Please update .env.local with your credentials!');
+        }
+
         let pythonExe = 'python';
 
         // 1. Check for bundled Python
