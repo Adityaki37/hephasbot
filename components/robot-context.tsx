@@ -10,135 +10,244 @@ interface CalibrationLimit {
     max: number;
 }
 
-interface RobotContextType {
-    driver: RobotDriver | null;
+// Data for a single robot instance
+export interface RobotInstance {
+    id: string;
+    name: string;
+    driver: RobotDriver;
     connected: boolean;
     calibrationState: CalibrationState;
-    item: string;
-    logs: string[];
     jointVals: number[];
     calibrationLimits: CalibrationLimit[];
-    connect: () => Promise<void>;
-    disconnect: () => Promise<void>;
-    startCalibration: () => void;
-    finishCalibration: () => void;
+    // We could track individual recording/free modes, but for now we might share or keep per-bot.
+    // Let's keep these per-bot since one might be recording while another is not? 
+    // Actually, distinct Free Mode is useful. 
+    freeMode: boolean;
+}
+
+interface RobotContextType {
+    // Fleet State
+    robots: Record<string, RobotInstance>;
+    activeRobotId: string | null;
+    syncControl: boolean;
+    logs: string[];
+
+    // Actions
+    // Actions
+    addRobot: () => Promise<void>;
+    setActiveRobot: (id: string) => void;
+    setSyncControl: (enabled: boolean) => void;
+    disconnectRobot: (id: string) => Promise<void>;
+
+    // Active Robot Proxies (or Unified Actions)
+    // These generally apply to the active robot, or ALL if syncControl is true for movements.
+    connect: () => Promise<void>; // Legacy alias for addRobot
+
+    // Speed
+    setSpeedMultiplier: (speed: number) => void;
+    speedMultiplier: number;
+
+    // Joint Control
     moveJoint: (jointIdx: number, value: number) => void;
     moveJointRel: (jointIdx: number, percentChange: number) => void;
     startManualMove: (jointIdx: number, direction: number) => void;
     stopManualMove: () => void;
+
+    // Config
+    startCalibration: () => void;
+    finishCalibration: () => void;
+    setFreeMode: (enabled: boolean) => Promise<void>;
+
+    // Recording (Global for now, uses Active Robot or All?)
+    // Let's make recording capture ALL robots if sync is on? 
+    // For simplicity, recording is currently designed for one trajectory. 
+    // We will bind recording to the ACTIVE robot for now.
+    isRecording: boolean;
+    isPlaying: boolean;
+    recordedTraj: number[][]; // Stores active robot's path
+    toggleRecording: () => void;
+    playRecording: () => Promise<void>;
+
+    // Helpers
+    item: string;
+    activeRobot: RobotInstance | null; // Helper accessor
 }
 
 const RobotContext = createContext<RobotContextType | undefined>(undefined);
 
 export function RobotProvider({ children }: { children: React.ReactNode }) {
-    const driverRef = useRef<RobotDriver | null>(null);
-    const [connected, setConnected] = useState(false);
-    const [calibrationState, setCalibrationState] = useState<CalibrationState>('unc');
+    // FLEET STATE
+    const [robots, setRobots] = useState<Record<string, RobotInstance>>({});
+    const [activeRobotId, setActiveRobotId] = useState<string | null>(null);
+    const [syncControl, setSyncControl] = useState(false);
+
     const [logs, setLogs] = useState<string[]>([]);
-    const [jointVals, setJointVals] = useState<number[]>([0, 0, 0, 0, 0, 0]);
+
+    // GLOBAL / ACTIVE STATE (Legacy wrappers)
+    const [isRecording, setIsRecording] = useState(false);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [recordedTraj, setRecordedTraj] = useState<number[][]>([]); // For the active robot
+
+    // Speed Control
+    const [speedMultiplier, setSpeedMultiplier] = useState(1.0);
+
+    // Helpers
+    const activeRobot = activeRobotId ? robots[activeRobotId] : null;
+
     const moveInterval = useRef<NodeJS.Timeout | null>(null);
-
-    // Track Joint 5 positions during calibration for gap detection
-    const j5PositionsRef = useRef<Set<number>>(new Set());
-
-    // Default calibration limits (Safety fallback)
-    const [calibrationLimits, setCalibrationLimits] = useState<CalibrationLimit[]>([
-        { min: 0, max: 4095 }, { min: 0, max: 4095 }, { min: 0, max: 4095 },
-        { min: 0, max: 4095 }, { min: 0, max: 4095 }, { min: 0, max: 4095 }
-    ]);
-
-    // Initialize driver ref once
-    if (!driverRef.current && typeof window !== 'undefined') {
-        driverRef.current = new RobotDriver();
-    }
+    const j5PositionsRef = useRef<Map<string, Set<number>>>(new Map()); // id -> map
 
     const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 10));
 
-    // Polling Loop for Read Position
+    // REF TO LATEST STATE (Fixes stale closures in setInterval/Timeouts)
+    const stateRef = useRef({ robots, activeRobotId, syncControl, speedMultiplier });
+    useEffect(() => {
+        stateRef.current = { robots, activeRobotId, syncControl, speedMultiplier };
+    }, [robots, activeRobotId, syncControl, speedMultiplier]);
+
+    // ----------- POLLING LOOP (FLEET WIDE) -----------
     useEffect(() => {
         let active = true;
-
-        // STS3215 servos use UNSIGNED 0-4095 range (360°)
         const isValidPosition = (val: number) => val >= 0 && val <= 4095;
 
-        // Use recursive timeout to prevent overlapping iterations
-        const runCalibrationLoop = async () => {
-            if (!active || !driverRef.current || !connected || calibrationState !== 'cal') {
-                if (active && calibrationState === 'cal') {
-                    setTimeout(runCalibrationLoop, 100);
-                }
+        const runLoop = async () => {
+            if (!active) return;
+
+            const robotIds = Object.keys(robots);
+            if (robotIds.length === 0) {
+                setTimeout(runLoop, 200);
                 return;
             }
 
-            // Read all joint positions
-            const readings: number[] = [];
-            for (let i = 0; i < 6; i++) {
-                try {
-                    const raw = await driverRef.current.readPosition(i + 1);
-                    const val = (raw !== -1 && isValidPosition(raw)) ? raw : -1;
-                    readings.push(val);
-                } catch (e) {
-                    readings.push(-1);
+            // We iterate all robots to update their state
+            // But we can't easily update state in a loop without functional updates.
+            // We will collect updates and apply once.
+
+            const updates: Record<string, Partial<RobotInstance>> = {};
+            let updatesFound = false;
+
+            for (const id of robotIds) {
+                const bot = robots[id];
+                if (!bot.connected || !bot.driver) continue;
+
+                // Conditions to read
+                const shouldRead = bot.calibrationState === 'cal' || bot.freeMode || (id === activeRobotId && isRecording);
+
+                if (!shouldRead) continue;
+
+                const readings: number[] = [];
+                for (let i = 0; i < 6; i++) {
+                    try {
+                        const raw = await bot.driver.readPosition(i + 1);
+                        readings.push((raw !== -1 && isValidPosition(raw)) ? raw : -1);
+                    } catch (e) {
+                        readings.push(-1);
+                    }
+                }
+
+                // 1. CALIBRATION LOGIC
+                if (bot.calibrationState === 'cal') {
+                    // Track J5
+                    if (readings[4] !== -1) {
+                        if (!j5PositionsRef.current.has(id)) j5PositionsRef.current.set(id, new Set());
+                        const set = j5PositionsRef.current.get(id)!;
+                        set.add(Math.round(readings[4] / 20) * 20);
+                    }
+
+                    // Update limits
+                    const newLimits = [...bot.calibrationLimits];
+                    let limitsChanged = false;
+                    readings.forEach((val, i) => {
+                        if (val !== -1) {
+                            if (val < newLimits[i].min) { newLimits[i].min = val; limitsChanged = true; }
+                            if (val > newLimits[i].max) { newLimits[i].max = val; limitsChanged = true; }
+                        }
+                    });
+
+                    if (limitsChanged) {
+                        updates[id] = { ...updates[id], calibrationLimits: newLimits };
+                        updatesFound = true;
+                    }
+                }
+
+                // 2. SYNC JOINTS
+                if (bot.calibrationState === 'cal' || bot.freeMode) {
+                    const newVals = readings.map((val, i) => {
+                        if (val === -1) return bot.jointVals[i];
+
+                        if (bot.calibrationState === 'cal') {
+                            // Raw: 0->-100, 2048->0, 4095->100
+                            return ((val - 2048) / 2048) * 100;
+                        } else {
+                            // Calibrated
+                            const limit = bot.calibrationLimits[i];
+                            const range = limit.max - limit.min;
+                            if (range > 0) {
+                                const norm = (val - limit.min) / range;
+                                return Math.max(-100, Math.min(100, (norm * 200) - 100));
+                            }
+                            return 0;
+                        }
+                    });
+
+                    // Only update if different enough? Or just update.
+                    updates[id] = { ...updates[id], jointVals: newVals };
+                    updatesFound = true;
+
+                    // 3. RECORDING (Only Active Robot)
+                    if (isRecording && id === activeRobotId) {
+                        setRecordedTraj(prev => [...prev, [...newVals]]);
+                    }
                 }
             }
 
-            // Track Joint 5 positions for gap detection
-            if (readings[4] !== -1) {
-                // Round to nearest 20 for better precision (100 was too coarse)
-                const rounded = Math.round(readings[4] / 20) * 20;
-                j5PositionsRef.current.add(rounded);
+            // Apply updates
+            if (updatesFound) {
+                setRobots(prev => {
+                    const next = { ...prev };
+                    Object.keys(updates).forEach(id => {
+                        next[id] = { ...next[id], ...updates[id] };
+                    });
+                    return next;
+                });
             }
 
-            // Update limits atomically - all joints use normal min/max tracking
-            setCalibrationLimits(prev => {
-                const next = prev.map(limit => ({ ...limit }));
-                readings.forEach((val, i) => {
-                    if (val !== -1) {
-                        if (val < next[i].min) next[i].min = val;
-                        if (val > next[i].max) next[i].max = val;
-                    }
-                });
-                // Log for debugging
-                console.log(`[CalLoop] J1: ${next[0].min}-${next[0].max} | J5: ${next[4].min}-${next[4].max} (${j5PositionsRef.current.size} positions tracked)`);
-                return next;
-            });
-
-            // Update sliders with readings using the standard 0-4095 range
-            // -100% = 0, 0% = 2048 (midpoint), +100% = 4095
-            setJointVals(prev => {
-                return readings.map((val, i) => {
-                    if (val === -1) return prev[i];
-                    // Map 0-4095 to -100..100 with midpoint at 0
-                    return ((val - 2048) / 2048) * 100;
-                });
-            });
-
-            // Schedule next iteration ONLY after this one completes
-            if (active) {
-                setTimeout(runCalibrationLoop, 100);
-            }
+            if (active) setTimeout(runLoop, isRecording ? 50 : 100);
         };
 
-        // Start the loop
-        if (calibrationState === 'cal') {
-            runCalibrationLoop();
-        }
-
+        runLoop();
         return () => { active = false; };
-    }, [connected, calibrationState]);
+    }, [robots, activeRobotId, isRecording]); // Re-binds when robot list changes. Optimize? 
+    // If robots changes, we restart loop. That's fine.
 
+    // ----------- ACTIONS -----------
 
-    const connect = async () => {
-        if (!driverRef.current) return;
+    const addRobot = async () => {
+        const newDriver = new RobotDriver();
         try {
-            const success = await driverRef.current.connect();
+            const success = await newDriver.connect();
             if (success) {
-                setConnected(true);
-                addLog("Connected to Serial Port");
-                setCalibrationState('unc');
-                await disableTorqueAll();
+                const id = crypto.randomUUID();
+                const num = Object.keys(robots).length + 1;
+                const newBot: RobotInstance = {
+                    id,
+                    name: `Robot ${num}`,
+                    driver: newDriver,
+                    connected: true,
+                    calibrationState: 'unc', // Explicitly uncalibrated on connect
+                    jointVals: [0, 0, 0, 0, 0, 0],
+                    calibrationLimits: Array(6).fill(null).map(() => ({ min: 0, max: 4095 })),
+                    freeMode: false
+                };
+
+                setRobots(prev => ({ ...prev, [id]: newBot }));
+                setActiveRobotId(id); // Auto-select new robot
+                addLog(`Connected to ${newBot.name}`);
+
+                // Disable Torque initially
+                for (let i = 1; i <= 6; i++) await newDriver.setTorque(i, false);
             } else {
-                addLog("Failed to connect");
+                addLog("Failed to connect to new robot");
             }
         } catch (e) {
             console.error(e);
@@ -146,374 +255,123 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
-    const disconnect = async () => {
-        if (!driverRef.current) return;
-        await driverRef.current.disconnect();
-        setConnected(false);
-        addLog("Disconnected");
-    };
-
-    const disableTorqueAll = async () => {
-        if (!driverRef.current) return;
-        for (let i = 1; i <= 6; i++) {
-            await driverRef.current.setTorque(i, false);
-            await new Promise(r => setTimeout(r, 10));
+    const disconnectRobot = async (id: string) => {
+        const bot = robots[id];
+        if (bot) {
+            await bot.driver.disconnect();
+            setRobots(prev => {
+                const next = { ...prev };
+                delete next[id];
+                return next;
+            });
+            if (activeRobotId === id) {
+                setActiveRobotId(Object.keys(robots).find(k => k !== id) || null);
+            }
+            addLog(`Disconnected ${bot.name}`);
         }
     };
 
-    const enableTorqueAll = async () => {
-        if (!driverRef.current) return;
-        for (let i = 1; i <= 6; i++) {
-            await driverRef.current.setTorque(i, true);
-            await new Promise(r => setTimeout(r, 10));
-        }
-    };
+    // --- JOINT MOVEMENTS (SYNC SUPPORT) ---
 
-    const startCalibration = async () => {
-        addLog("Starting Calibration - Torque DISABLED. Move to limits.");
-        await disableTorqueAll();
-
-        // Clear J5 position tracking for gap detection
-        j5PositionsRef.current.clear();
-
-        const isValidPosition = (val: number) => val >= 0 && val <= 4095;
-
-        const initialLimits: { min: number; max: number }[] = [];
-        if (driverRef.current) {
-            for (let i = 0; i < 6; i++) {
-                try {
-                    const raw = await driverRef.current.readPosition(i + 1);
-                    const pos = (raw !== -1 && isValidPosition(raw)) ? raw : 2048;
-                    initialLimits.push({ min: pos, max: pos });
-                } catch (e) {
-                    initialLimits.push({ min: 2048, max: 2048 });
-                }
-            }
-        } else {
-            for (let i = 0; i < 6; i++) {
-                initialLimits.push({ min: 2048, max: 2048 });
-            }
+    // Generic helper to apply function to target(s)
+    const applyToTargets = async (fn: (bot: RobotInstance) => Promise<void> | void) => {
+        const { robots, activeRobotId, syncControl } = stateRef.current;
+        const targets: RobotInstance[] = [];
+        if (syncControl) {
+            Object.values(robots).forEach(b => { if (b.connected) targets.push(b); });
+        } else if (activeRobotId && robots[activeRobotId]) {
+            targets.push(robots[activeRobotId]);
         }
 
-        setCalibrationLimits(initialLimits);
-        addLog("Move each joint to its limits.");
-
-        setCalibrationState('cal');
+        await Promise.all(targets.map(fn));
     };
 
-    const finishCalibration = async () => {
-        // Set state to 'finishing' to stop the polling loop immediately
-        setCalibrationState('finishing');
+    const moveJoint = async (jointIdx: number, value: number) => {
+        if (!activeRobotId && !syncControl) return;
 
-        // LOG CAPTURED LIMITS FOR DEBUGGING
-        console.log("=== CALIBRATION COMPLETE ===");
-        calibrationLimits.forEach((limit, i) => {
-            console.log(`Joint ${i + 1}: Min=${limit.min}, Max=${limit.max}, Range=${limit.max - limit.min}`);
-        });
-
-        // Gap detection for Joint 5 (wrist roll)
-        // Filter noise: Remove isolated points or small clusters inside the gap
-        const j5Positions = Array.from(j5PositionsRef.current).sort((a, b) => a - b);
-
-
-
-
-
-
-
-
-
-
-        console.log(`[J5 Gap] Tracked ${j5Positions.length} positions:`, j5Positions);
-
-        if (j5Positions.length >= 2) {
-            // Find the largest gap between consecutive positions
-            let largestGap = 0;
-            let gapLowEdge = 0;  // Position just before the gap
-            let gapHighEdge = 0; // Position just after the gap
-
-            for (let i = 0; i < j5Positions.length - 1; i++) {
-                const gap = j5Positions[i + 1] - j5Positions[i];
-                if (gap > largestGap) {
-                    largestGap = gap;
-                    gapLowEdge = j5Positions[i];      // Last visited position before gap
-                    gapHighEdge = j5Positions[i + 1]; // First visited position after gap
-                }
-            }
-
-            // Also check the wrap-around gap (from last position to first, going through 0/4095)
-            const wrapGap = (j5Positions[0] + 4096) - j5Positions[j5Positions.length - 1];
-            if (wrapGap > largestGap) {
-                largestGap = wrapGap;
-                gapLowEdge = j5Positions[j5Positions.length - 1]; // Last before wrap
-                gapHighEdge = j5Positions[0];                      // First after wrap
-            }
-
-            console.log(`[J5 Gap] Largest gap: ${largestGap} (from ${gapLowEdge} to ${gapHighEdge})`);
-
-            // If gap is significant (>= 200), set J5 limits based on gap
-            // The GAP is where the robot CAN'T go (the wall)
-            // The USABLE range is OUTSIDE the gap
-            // So: min = gapHighEdge (start of usable range), max = gapLowEdge (end of usable range)
-            // Movement: -100% = gapHighEdge, +100% = gapLowEdge
-            // The servo moves through the usable range (gapHighEdge -> 4095 -> 0 -> gapLowEdge)
-            if (largestGap >= 200) {
-                setCalibrationLimits(prev => {
-                    const next = [...prev];
-                    // min = high edge of gap (where usable range STARTS) + 20 buffer
-                    // max = low edge of gap (where usable range ENDS) - 20 buffer
-                    // This shrinks the valid range slightly to avoid hitting the wall
-                    const safeMin = (gapHighEdge + 20) % 4096;
-                    const safeMax = (gapLowEdge - 20 + 4096) % 4096;
-
-                    next[4] = { min: safeMin, max: safeMax };
+        // Optimistic UI update for active robot immediately
+        if (activeRobotId && robots[activeRobotId]) {
+            // We can't easily optimistic update "All" in state without flicker or complexity.
+            // But for the active one, we should.
+            const bot = robots[activeRobotId];
+            if (!bot.freeMode) {
+                // Update state
+                setRobots(prev => {
+                    const next = { ...prev };
+                    const b = { ...next[activeRobotId!] };
+                    const vals = [...b.jointVals];
+                    vals[jointIdx] = value;
+                    b.jointVals = vals;
+                    next[activeRobotId!] = b;
                     return next;
                 });
-                addLog(`J5: Gap detected ${gapLowEdge}-${gapHighEdge}. Usable range: ${gapHighEdge}→${gapLowEdge}`);
-                console.log(`[J5 Gap] Usable range: ${gapHighEdge} (-100%) -> 4095 -> 0 -> ${gapLowEdge} (+100%)`);
-            } else {
-                console.log(`[J5 Gap] No significant gap found (${largestGap}), using normal min/max`);
             }
         }
 
-        console.log("============================");
+        await applyToTargets(async (bot) => {
+            if (bot.freeMode) return;
+            if (bot.calibrationState !== 'rdy') return; // Enforce readiness
 
-        // Configure servo hardware limits to match calibrated range
-        addLog("Configuring servo position limits...");
-        if (driverRef.current) {
-            for (let i = 0; i < 6; i++) {
-                const limit = calibrationLimits[i];
-                const servoId = i + 1;
-
-                // Skip J5 if using gap-based limits (min > max)
-                // BUT we must ENSURE hardware limits are fully open (0-4095) so it can wrap
-                if (i === 4 && limit.min > limit.max) {
-                    console.log(`[ConfigLimits] J5: Resetting hardware limits to 0-4095 for wrap-around (Soft limits: ${limit.min}-${limit.max})`);
-                    try {
-                        // Reset J5 to full range so physical wrapping works
-                        await driverRef.current.unlockEEPROM(servoId);
-                        await driverRef.current.setPositionLimits(servoId, 0, 4095);
-                        await driverRef.current.lockEEPROM(servoId);
-                    } catch (e) {
-                        console.error(`Failed to reset J5 limits`, e);
-                    }
-                    continue; // Skip the normal limit setting
-                }
-
-                try {
-                    // Clamp to valid hardware range
-                    let min = Math.max(0, Math.min(4095, limit.min));
-                    let max = Math.max(0, Math.min(4095, limit.max));
-
-                    // Safety: ensure min < max (swap if needed)
-                    if (min > max) {
-                        console.warn(`[ConfigLimits] J${servoId}: Min > Max (${min} > ${max}), swapping!`);
-                        [min, max] = [max, min];
-                    }
-
-                    // Read current limits to compare
-                    const currentLimits = await driverRef.current.readPositionLimits(servoId);
-                    console.log(`[ConfigLimits] J${servoId}: Current=${currentLimits.min}-${currentLimits.max}, New=${min}-${max}`);
-
-                    // Only update if different
-                    if (currentLimits.min !== min || currentLimits.max !== max) {
-                        // Unlock EEPROM, write limits, lock EEPROM
-                        await driverRef.current.unlockEEPROM(servoId);
-                        await new Promise(r => setTimeout(r, 10)); // Small delay
-                        await driverRef.current.setPositionLimits(servoId, min, max);
-                        await new Promise(r => setTimeout(r, 10)); // Small delay
-                        await driverRef.current.lockEEPROM(servoId);
-                        console.log(`[ConfigLimits] J${servoId}: Updated servo limits to ${min}-${max}`);
-                    }
-                } catch (e) {
-                    console.error(`Failed to configure limits for joint ${i + 1}:`, e);
-                }
-            }
-        }
-
-        addLog("Enabling Torque...");
-        await enableTorqueAll();
-
-        // STS3215 uses UNSIGNED 0-4095 range
-        const isValidPosition = (val: number) => val >= 0 && val <= 4095;
-
-        // Clamp limits to valid 0-4095 range
-        setCalibrationLimits(prev => {
-            const clamped = prev.map(limit => ({
-                min: Math.max(0, Math.min(4095, limit.min)),
-                max: Math.max(0, Math.min(4095, limit.max))
-            }));
-            console.log("Clamped Limits to 0-4095:", clamped);
-            return clamped;
-        });
-
-        // Sync UI sliders with current physical position preventing "jumps"
-        if (driverRef.current) {
-            const newJointVals = [...jointVals];
-            for (let i = 0; i < 6; i++) {
-                try {
-                    const raw = await driverRef.current.readPosition(i + 1);
-                    const pos = (raw !== -1 && isValidPosition(raw)) ? raw : -1;
-
-                    if (pos !== -1) {
-                        const rawLimit = calibrationLimits[i];
-                        const limit = {
-                            min: Math.max(0, Math.min(4095, rawLimit.min)),
-                            max: Math.max(0, Math.min(4095, rawLimit.max))
-                        };
-                        const range = limit.max - limit.min;
-
-                        if (range > 0) {
-                            // Map Physical (Min..Max) -> Slider (-100..100)
-                            const normalized = (pos - limit.min) / range;
-                            const sliderVal = (normalized * 200) - 100;
-                            newJointVals[i] = Math.max(-100, Math.min(100, sliderVal));
-                        } else {
-                            newJointVals[i] = 0;
-                        }
-                    }
-                } catch (e) {
-                    console.error(`Failed to sync joint ${i}`, e);
-                }
-            }
-            setJointVals(newJointVals);
-        }
-
-        setCalibrationState('rdy');
-
-        // Log final state for debugging
-        addLog(`Calibration complete! J1: ${calibrationLimits[0].min}-${calibrationLimits[0].max}`);
-    };
-
-    // Absolute Move (-100 to 100) based on Calibrated Range
-    const moveJoint = async (jointIdx: number, value: number) => {
-        if (!driverRef.current || calibrationState !== 'rdy') return;
-
-        const limit = calibrationLimits[jointIdx];
-        let finalPos: number;
-
-        // Joint 5: Handle gap-based limits where min > max (range goes through 0)
-        // min = low edge of gap (e.g., 2950), max = high edge of gap (e.g., 3300)
-        // Movement: -100% = min (2950), +100% = max (3300)
-        // The "usable" range goes: min -> 0 -> max (the "long way" around, avoiding the gap)
-        if (jointIdx === 4 && limit.min > limit.max) {
-            // Range goes: min -> 4095 -> 0 -> max (crossing 0)
-            // Total range = (4096 - min) + max
-            const totalRange = (4096 - limit.min) + limit.max;
-            const normalized = (value + 100) / 200; // 0..1
-            const offset = Math.floor(normalized * totalRange);
-
-            // Start from min and go FORWARD (increasing toward 4095, wrapping to 0)
-            finalPos = (limit.min + offset) % 4096;
-
-            console.log(`[Move] J5 (gap): slider=${value.toFixed(0)}% -> offset=${offset}/${totalRange} -> final=${finalPos} (gap: ${limit.max}-${limit.min})`);
-        } else {
-            // Normal range: min..max
+            const limit = bot.calibrationLimits[jointIdx];
             const range = limit.max - limit.min;
-            const normalized = (value + 100) / 200;
-            let targetPos = Math.floor(limit.min + (normalized * range));
+            const norm = (value + 100) / 200;
+            let target = Math.floor(limit.min + (norm * range));
 
-            // Clamp to Calibrated Limits then to Hardware Range (0-4095)
-            targetPos = Math.max(limit.min, Math.min(limit.max, targetPos));
-            finalPos = Math.max(0, Math.min(4095, targetPos));
+            // Clamp
+            target = Math.max(limit.min, Math.min(limit.max, target));
+            target = Math.max(0, Math.min(4095, target));
 
-            console.log(`[Move] J${jointIdx + 1}: slider=${value.toFixed(0)}% -> final=${finalPos} (limits: ${limit.min}..${limit.max})`);
-        }
-
-        await driverRef.current.setPosition(jointIdx + 1, finalPos);
-
-        setJointVals(prev => {
-            const next = [...prev];
-            next[jointIdx] = value;
-            return next;
+            await bot.driver.setPosition(jointIdx + 1, target);
         });
     };
 
-    // Relative Move (Percent Change)
     const moveJointRel = async (jointIdx: number, percentChange: number) => {
-        if (!driverRef.current) return;
+        // More complex for Sync: relative to EACH robot's current pos?
+        // Yes.
+        await applyToTargets(async (bot) => {
+            if (bot.freeMode) return;
+            // Read current effective percentage
+            // We can use bot.jointVals[jointIdx] which is -100..100
+            const current = bot.jointVals[jointIdx];
+            // Apply speed multiplier
+            const { speedMultiplier } = stateRef.current;
+            const delta = (percentChange / 100) * 200 * speedMultiplier;
+            const next = Math.max(-100, Math.min(100, current + delta));
 
-        // 1. Try to read ACTUAL position from robot to prevent jumps
-        let currentEffectiveVal = jointVals[jointIdx]; // Fallback to state
+            // call internal move helper (duplicate logic but eh)
+            // Better to just call moveJoint logic inline or extract
 
-        // STS3215 uses UNSIGNED 0-4095 range
-        const isValidPosition = (val: number) => val >= 0 && val <= 4095;
+            const limit = bot.calibrationLimits[jointIdx];
+            const range = limit.max - limit.min;
+            const norm = (next + 100) / 200;
+            const target = Math.max(0, Math.min(4095, Math.floor(limit.min + (norm * range))));
 
-        try {
-            const raw = await driverRef.current.readPosition(jointIdx + 1);
-            const physicalPos = (raw !== -1 && isValidPosition(raw)) ? raw : -1;
+            await bot.driver.setPosition(jointIdx + 1, target);
 
-            console.log(`[MoveRel] J${jointIdx + 1} Physical: ${physicalPos} (Raw: ${raw})`);
-
-            if (physicalPos !== -1) {
-                const limit = calibrationLimits[jointIdx];
-
-                // J5 with gap-based limits (min > max, range goes through 0)
-                if (jointIdx === 4 && limit.min > limit.max) {
-                    const totalRange = (4096 - limit.min) + limit.max;
-                    // Calculate offset from min going FORWARD (increasing) through 0
-                    let offset: number;
-                    // Check if inside gap (between max and min)
-                    if (physicalPos > limit.max && physicalPos < limit.min) {
-                        // Position is in the invalid gap (or buffer zone)
-                        // Snap to NEAREST limit to avoid jumping across the wall
-                        const distToMin = Math.abs(physicalPos - limit.min);
-                        const distToMax = Math.abs(physicalPos - limit.max);
-
-                        if (distToMin < distToMax) {
-                            offset = 0; // Closer to start (min)
-                        } else {
-                            offset = totalRange; // Closer to end (max)
-                        }
-                    } else {
-                        // Position is in usable range
-                        if (physicalPos >= limit.min) {
-                            offset = physicalPos - limit.min;
-                        } else {
-                            // Wrapped around 0 (e.g., physicalPos=100, min=3300)
-                            // Offset = (4096 - min) + physicalPos
-                            offset = (4096 - limit.min) + physicalPos;
-                        }
-                    }
-                    const normalized = offset / totalRange;
-                    const calculatedVal = -100 + (normalized * 200);
-                    console.log(`[MoveRel] J5 (gap): offset=${offset}/${totalRange} -> PhysVal: ${calculatedVal.toFixed(2)}`);
-                    currentEffectiveVal = calculatedVal;
-                } else {
-                    // Normal range
-                    const range = limit.max - limit.min;
-                    console.log(`[MoveRel] J${jointIdx + 1} Limit: [${limit.min}, ${limit.max}] Range: ${range}`);
-
-                    if (range > 0) {
-                        const normalized = (physicalPos - limit.min) / range;
-                        const calculatedVal = (normalized * 200) - 100;
-                        console.log(`[MoveRel] J${jointIdx + 1} PhysVal: ${calculatedVal.toFixed(2)}`);
-                        currentEffectiveVal = calculatedVal;
-                    }
+            // We need to update state so successive relative moves work
+            // But we are in a loop update...
+            // Let's force update state for everyone? Expensive?
+            // Not really for <5 robots.
+            setRobots(prev => {
+                const n = { ...prev };
+                if (n[bot.id]) {
+                    const vals = [...n[bot.id].jointVals];
+                    vals[jointIdx] = next;
+                    n[bot.id] = { ...n[bot.id], jointVals: vals };
                 }
-            } else {
-                console.warn(`[MoveRel] Failed to read valid position for J${jointIdx + 1} (got -1)`);
-            }
-        } catch (e) {
-            console.warn("Failed to read pos for relative move, using state", e);
-        }
-
-        const delta = (percentChange / 100) * 200; // e.g. 0.02 * 200 = 4
-        const nextVal = Math.min(Math.max(currentEffectiveVal + delta, -100), 100);
-
-        await moveJoint(jointIdx, nextVal);
+                return n;
+            });
+        });
     };
 
+    // Wrapper for interval checks
     const startManualMove = (jointIdx: number, direction: number) => {
-        if (moveInterval.current) return; // Already moving
-
-        // Initial move
-        moveJointRel(jointIdx, direction * 2); // 2% immediate move
-
-        // Loop for continuous movement
-        moveInterval.current = setInterval(() => {
-            moveJointRel(jointIdx, direction * 2); // 2% per tick
-        }, 150); // Slightly slower tick
+        if (moveInterval.current) return;
+        // Faster interval (30ms) for smoother motion
+        // Smaller step (0.5%) per tick, totaling ~16% per second at 1x speed
+        const tick = () => moveJointRel(jointIdx, direction * 0.5);
+        tick();
+        moveInterval.current = setInterval(tick, 30);
     };
 
     const stopManualMove = () => {
@@ -523,23 +381,206 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
+
+    // --- TORQUE HELPER ---
+    const setAllTorque = async (bot: RobotInstance, enable: boolean) => {
+        for (let i = 1; i <= 6; i++) {
+            let success = false;
+            // Retry logic: 3 attempts
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    await bot.driver.setTorque(i, enable);
+                    success = true;
+                    break;
+                } catch (e) {
+                    console.warn(`[${bot.name}] Failed to set torque for J${i}, attempt ${attempt + 1}`);
+                    await new Promise(r => setTimeout(r, 10));
+                }
+            }
+            if (!success) addLog(`[${bot.name}] Warning: Failed to set torque J${i}`);
+
+            // Small delay between servos to prevent flooding serial bus
+            await new Promise(r => setTimeout(r, 10));
+        }
+    };
+
+    // --- CALIBRATION (Active Only) ---
+    // Calibration is complex to sync. Let's force Calibration to be PER ROBOT (Active).
+    // Syncing calibration seems dangerous/confusing.
+
+    const startCalibration = async () => {
+        if (!activeRobotId) return;
+        const id = activeRobotId;
+        const bot = robots[id];
+
+        addLog(`[${bot.name}] Starting Calibration...`);
+        // Use robust helper
+        await setAllTorque(bot, false);
+
+        j5PositionsRef.current.delete(id); // Clear history
+
+        // Initial READ to prevent big jump
+        const initLimits: CalibrationLimit[] = [];
+        for (let i = 0; i < 6; i++) {
+            const val = await bot.driver.readPosition(i + 1);
+            const safe = (val !== -1 && val >= 0 && val <= 4095) ? val : 2048;
+            initLimits.push({ min: safe, max: safe });
+        }
+
+        setRobots(prev => ({
+            ...prev,
+            [id]: {
+                ...prev[id],
+                calibrationLimits: initLimits,
+                calibrationState: 'cal'
+            }
+        }));
+    };
+
+    const finishCalibration = async () => {
+        if (!activeRobotId) return;
+        const id = activeRobotId;
+        const bot = robots[id];
+
+        // Update state to finishing
+        setRobots(prev => ({ ...prev, [id]: { ...prev[id], calibrationState: 'finishing' } }));
+
+        // Config Hardware Limits
+        addLog(`[${bot.name}] Configuring hardware limits...`);
+        for (let i = 0; i < 6; i++) {
+            const servoId = i + 1;
+            // J5 Safety (Hardware 0-4095)
+            if (i === 4) {
+                await bot.driver.unlockEEPROM(servoId);
+                await bot.driver.setPositionLimits(servoId, 0, 4095);
+                await bot.driver.lockEEPROM(servoId);
+                continue;
+            }
+
+            const limit = bot.calibrationLimits[i];
+            let min = Math.max(0, Math.min(4095, limit.min));
+            let max = Math.max(0, Math.min(4095, limit.max));
+            if (min > max) [min, max] = [max, min];
+
+            // Write to EEPROM if different
+            try {
+                const curr = await bot.driver.readPositionLimits(servoId);
+                if (curr.min !== min || curr.max !== max) {
+                    await bot.driver.unlockEEPROM(servoId);
+                    await bot.driver.setPositionLimits(servoId, min, max);
+                    await bot.driver.lockEEPROM(servoId);
+                }
+            } catch (e) {/* ignore */ }
+        }
+
+        await new Promise(r => setTimeout(r, 200));
+        // Re-enable Torque using robust helper
+        await setAllTorque(bot, true);
+
+        // Final State Update
+        setRobots(prev => ({
+            ...prev,
+            [id]: { ...prev[id], calibrationState: 'rdy' }
+        }));
+
+        // Trigger a read to sync sliders
+        // (Handled by next poll loop essentially, but we reset sliders to 0 or sync?)
+        // The loop will sync them.
+        addLog(`[${bot.name}] Calibration Ready!`);
+    };
+
+    // --- FREE MODE (Subject to Sync?) ---
+    const setFreeMode = async (enabled: boolean) => {
+        await applyToTargets(async (bot) => {
+            await setAllTorque(bot, !enabled); // if enabled=true, torque=false
+
+            setRobots(prev => ({
+                ...prev,
+                [bot.id]: { ...prev[bot.id], freeMode: enabled }
+            }));
+        });
+
+        addLog(enabled ? "Free Mode ON" : "Free Mode OFF");
+    };
+
+    // --- RECORDING ---
+    // Currently only records ACTIVE robot.
+    const toggleRecording = () => {
+        if (isRecording) {
+            setIsRecording(false);
+            addLog(`Recording stopped. ${recordedTraj.length} frames.`);
+        } else {
+            setRecordedTraj([]);
+            setIsRecording(true);
+            addLog("Recording started...");
+        }
+    };
+
+    const playRecording = async () => {
+        if (recordedTraj.length === 0) return;
+
+        // Disable free mode if on
+        await setFreeMode(false);
+
+        setIsPlaying(true);
+        addLog(`Playing ${recordedTraj.length} frames on Target(s)...`);
+
+        // Replays on ALL targeted robots (Sync)
+        for (const frame of recordedTraj) {
+            // Apply frame to all targets
+            // frame is [val, val...] (-100 to 100)
+            await applyToTargets(async (bot) => {
+                for (let i = 0; i < 6; i++) {
+                    // Calculate target pos from frame value
+                    const val = frame[i];
+                    const limit = bot.calibrationLimits[i];
+                    const range = limit.max - limit.min;
+                    const norm = (val + 100) / 200;
+                    const pos = Math.floor(limit.min + (norm * range));
+                    // Clamp
+                    const safe = Math.max(0, Math.min(4095, Math.max(limit.min, Math.min(limit.max, pos))));
+                    await bot.driver.setPosition(i + 1, safe);
+                }
+            });
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        setIsPlaying(false);
+        addLog("Playback finished.");
+    };
+
     return (
         <RobotContext.Provider value={{
-            driver: driverRef.current,
-            connected,
-            calibrationState,
-            item: "so-100",
+            robots,
+            activeRobotId,
+            syncControl,
             logs,
-            jointVals,
-            calibrationLimits,
-            connect,
-            disconnect,
-            startCalibration,
-            finishCalibration,
+            addRobot,
+            setActiveRobot: setActiveRobotId,
+            setSyncControl,
+            disconnectRobot,
+
+            // Proxies
+            connect: addRobot,
             moveJoint,
             moveJointRel,
             startManualMove,
-            stopManualMove
+            stopManualMove,
+            startCalibration,
+            finishCalibration,
+            setFreeMode,
+
+            isRecording,
+            isPlaying,
+            recordedTraj,
+            toggleRecording,
+            playRecording,
+
+            speedMultiplier,
+            setSpeedMultiplier,
+
+            item: "so-100",
+            get activeRobot() { return activeRobotId ? robots[activeRobotId] : null }
         }}>
             {children}
         </RobotContext.Provider>
@@ -548,8 +589,21 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
 export function useRobot() {
     const context = useContext(RobotContext);
-    if (context === undefined) {
-        throw new Error('useRobot must be used within a RobotProvider');
-    }
-    return context;
+    if (!context) throw new Error("useRobot must be used within RobotProvider");
+
+    // BACKWARD COMPATIBILITY LAYER
+    // Many components confirm strictly to 'connected', 'jointVals', etc.
+    // We map the ACTIVE robot's state to these top-level properties.
+    const active = context.activeRobot;
+
+    return {
+        ...context,
+        // Overrides/Aliases for active robot
+        connected: active ? active.connected : false,
+        calibrationState: active ? active.calibrationState : 'unc',
+        jointVals: active ? active.jointVals : [0, 0, 0, 0, 0, 0],
+        calibrationLimits: active ? active.calibrationLimits : [],
+        freeMode: active ? active.freeMode : false,
+        // driver: active?.driver // Do not expose raw driver if possible, use context methods
+    };
 }

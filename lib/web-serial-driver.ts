@@ -29,18 +29,55 @@ export class SerialConnection {
     }
 
     async disconnect() {
-        if (this.reader) {
-            await this.reader.cancel();
+        try {
+            // Release writer first
+            if (this.writer) {
+                try {
+                    await this.writer.close();
+                } catch (e) {
+                    console.warn("Writer close error (may already be closed):", e);
+                }
+                this.writer = null;
+            }
+
+            // Wait for any locked readable stream to be released
+            if (this.port?.readable?.locked) {
+                console.log("Waiting for readable stream lock to release...");
+                // Give pending reads a moment to complete
+                await new Promise(r => setTimeout(r, 100));
+            }
+
+            // Cancel persistent reader if exists
+            if (this.reader) {
+                try {
+                    await this.reader.cancel();
+                } catch (e) {
+                    console.warn("Reader cancel error:", e);
+                }
+                this.reader = null;
+            }
+
             await this.readableStreamClosed?.catch(() => { });
+            await this.writableStreamClosed?.catch(() => { });
+
+            // Close the port
+            if (this.port) {
+                try {
+                    // Wait a bit more if still locked
+                    if (this.port.readable?.locked || this.port.writable?.locked) {
+                        await new Promise(r => setTimeout(r, 200));
+                    }
+                    await this.port.close();
+                } catch (e) {
+                    console.warn("Port close error:", e);
+                }
+                this.port = null;
+            }
+        } catch (e) {
+            console.error("Disconnect error:", e);
+            // Force cleanup
             this.reader = null;
-        }
-        if (this.writer) {
-            await this.writer.close();
-            await this.writableStreamClosed;
             this.writer = null;
-        }
-        if (this.port) {
-            await this.port.close();
             this.port = null;
         }
     }
@@ -300,5 +337,67 @@ export class RobotDriver {
             const packet = this.createPacket(id, INST_WRITE, params);
             await this.connection.write(packet);
         });
+    }
+
+    // Reset a servo's position limits to full range (0-4095)
+    // Use this to fix servos that got restricted limits written to EEPROM
+    async resetServoLimits(id: number): Promise<boolean> {
+        try {
+            console.log(`[ResetLimits] Resetting servo ${id} to full range 0-4095...`);
+
+            // Read current limits first
+            const currentLimits = await this.readPositionLimits(id);
+            console.log(`[ResetLimits] Servo ${id} current limits: ${currentLimits.min}-${currentLimits.max}`);
+
+            // IMPORTANT: Disable torque BEFORE writing to EEPROM
+            console.log(`[ResetLimits] Disabling torque on servo ${id}...`);
+            await this.setTorque(id, false);
+            await new Promise(r => setTimeout(r, 100)); // Wait for torque to disable
+
+            // Unlock EEPROM
+            console.log(`[ResetLimits] Unlocking EEPROM...`);
+            await this.unlockEEPROM(id);
+            await new Promise(r => setTimeout(r, 200)); // Longer wait for EEPROM unlock
+
+            // Write full range limits
+            console.log(`[ResetLimits] Writing limits 0-4095...`);
+            await this.setPositionLimits(id, 0, 4095);
+            await new Promise(r => setTimeout(r, 200)); // Wait for EEPROM write
+
+            // Lock EEPROM
+            console.log(`[ResetLimits] Locking EEPROM...`);
+            await this.lockEEPROM(id);
+            await new Promise(r => setTimeout(r, 200)); // Wait for lock
+
+            // Verify the write
+            const newLimits = await this.readPositionLimits(id);
+            console.log(`[ResetLimits] Servo ${id} new limits: ${newLimits.min}-${newLimits.max}`);
+
+            const success = newLimits.min === 0 && newLimits.max === 4095;
+            if (success) {
+                console.log(`[ResetLimits] ✓ Servo ${id} successfully reset to full range!`);
+            } else {
+                console.error(`[ResetLimits] ✗ Servo ${id} reset failed - limits are ${newLimits.min}-${newLimits.max}`);
+                console.log(`[ResetLimits] Tip: Try power cycling the servo and running reset again.`);
+            }
+
+            return success;
+        } catch (e) {
+            console.error(`[ResetLimits] Error resetting servo ${id}:`, e);
+            return false;
+        }
+    }
+
+    // Reset all servos (1-6) to full range
+    async resetAllServoLimits(): Promise<{ id: number; success: boolean }[]> {
+        const results: { id: number; success: boolean }[] = [];
+
+        for (let id = 1; id <= 6; id++) {
+            const success = await this.resetServoLimits(id);
+            results.push({ id, success });
+            await new Promise(r => setTimeout(r, 50)); // Small delay between servos
+        }
+
+        return results;
     }
 }
