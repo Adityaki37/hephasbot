@@ -53,8 +53,11 @@ export class SerialConnection {
     async read(length: number): Promise<Uint8Array> {
         if (!this.port || !this.port.readable) return new Uint8Array(0);
 
-        // Simple blocking read implementation for demo
-        // In production, we'd want a proper buffer queue
+        // Wait if stream is locked (prevent "locked to a reader" error)
+        while (this.port.readable.locked) {
+            await new Promise(r => setTimeout(r, 5));
+        }
+
         const reader = this.port.readable.getReader();
         try {
             const { value, done } = await reader.read();
@@ -76,9 +79,29 @@ const INST_SYNC_WRITE = 0x83;
 
 export class RobotDriver {
     connection: SerialConnection;
+    private _mutex = Promise.resolve();
 
     constructor() {
         this.connection = new SerialConnection();
+    }
+
+    // Mutex helper to ensure atomic transactions
+    private async runExclusive<T>(task: () => Promise<T>): Promise<T> {
+        let release: () => void;
+        const currentLock = new Promise<void>(resolve => { release = resolve; });
+
+        // Chain the new lock to the existing one
+        const previousLock = this._mutex;
+        this._mutex = currentLock;
+
+        // Wait for previous to finish
+        await previousLock.catch(() => { });
+
+        try {
+            return await task();
+        } finally {
+            release!();
+        }
     }
 
     async connect() {
@@ -107,17 +130,19 @@ export class RobotDriver {
     }
 
     async writeRegister(id: number, address: number, value: number, bytes: number = 2) {
-        // Little Endian
-        const params = [address];
-        if (bytes === 1) {
-            params.push(value & 0xFF);
-        } else if (bytes === 2) {
-            params.push(value & 0xFF);
-            params.push((value >> 8) & 0xFF);
-        }
+        await this.runExclusive(async () => {
+            // Little Endian
+            const params = [address];
+            if (bytes === 1) {
+                params.push(value & 0xFF);
+            } else if (bytes === 2) {
+                params.push(value & 0xFF);
+                params.push((value >> 8) & 0xFF);
+            }
 
-        const packet = this.createPacket(id, INST_WRITE, params);
-        await this.connection.write(packet);
+            const packet = this.createPacket(id, INST_WRITE, params);
+            await this.connection.write(packet);
+        });
     }
 
     async setTorque(id: number, enable: boolean) {
@@ -153,57 +178,127 @@ export class RobotDriver {
     }
 
     async readPosition(id: number): Promise<number> {
-        // Address 56 (0x38) is Present Position (2 bytes)
-        const addr = 56;
-        const readLen = 2;
+        return this.runExclusive(async () => {
+            // Address 56 (0x38) is Present Position (2 bytes)
+            const addr = 56;
+            const readLen = 2;
 
-        const params = [addr, readLen];
-        const packet = this.createPacket(id, INST_READ, params);
+            const params = [addr, readLen];
+            const packet = this.createPacket(id, INST_READ, params);
 
-        // Clear buffer before write (hacky but helps)
-        await this.connection.read(100);
+            // Clear buffer before write (hacky but helps) - REMOVED blocking read
+            // await this.connection.read(100);
 
-        await this.connection.write(packet);
+            await this.connection.write(packet);
 
-        // Expected response size: 2 header + 1 id + 1 len + 1 err + 2 params + 1 check = 8 bytes
-        const res = await this.readPacket(id, 8);
+            // Expected response size: 2 header + 1 id + 1 len + 1 err + 2 params + 1 check = 8 bytes
+            const res = await this.readPacket(id, 8);
 
-        if (res && res.length >= 8) {
-            // Error byte at idx 4. Params at 5, 6.
-            const serverErr = res[4];
-            if (serverErr !== 0) {
-                // console.warn(`Motor ${id} error: ${serverErr}`);
+            if (res && res.length >= 8) {
+                // Error byte at idx 4. Params at 5, 6.
+                const serverErr = res[4];
+                if (serverErr !== 0) {
+                    // console.warn(`Motor ${id} error: ${serverErr}`);
+                }
+
+                const low = res[5];
+                const high = res[6];
+                return (high << 8) | low;
             }
 
-            const low = res[5];
-            const high = res[6];
-            return (high << 8) | low;
-        }
-
-        return -1;
+            return -1;
+        });
     }
 
     async setPosition(id: number, position: number, speed: number = 0, time: number = 0) {
-        // Address 42 is Goal Position (2 bytes)
-        // Usually followed by Time (2 bytes) and Speed (2 bytes)
-        // SCS/STS is slightly different, usually:
-        // Goal Position (2B) + (Time (2B)) + (Speed (2B))
-        // Address 42
+        await this.runExclusive(async () => {
+            // Address 42 is Goal Position (2 bytes)
+            // Usually followed by Time (2 bytes) and Speed (2 bytes)
+            // SCS/STS is slightly different, usually:
+            // Goal Position (2B) + (Time (2B)) + (Speed (2B))
+            // Address 42
 
-        const params = [42];
-        // Pos
-        params.push(position & 0xFF);
-        params.push((position >> 8) & 0xFF);
+            const params = [42];
+            // Pos
+            params.push(position & 0xFF);
+            params.push((position >> 8) & 0xFF);
 
-        // Time (optional usually, but let's send 0)
-        params.push(time & 0xFF);
-        params.push((time >> 8) & 0xFF);
+            // Time (optional usually, but let's send 0)
+            params.push(time & 0xFF);
+            params.push((time >> 8) & 0xFF);
 
-        // Speed
-        params.push(speed & 0xFF);
-        params.push((speed >> 8) & 0xFF);
+            // Speed
+            params.push(speed & 0xFF);
+            params.push((speed >> 8) & 0xFF);
 
-        const packet = this.createPacket(id, INST_WRITE, params);
-        await this.connection.write(packet);
+            const packet = this.createPacket(id, INST_WRITE, params);
+            await this.connection.write(packet);
+        });
+    }
+
+    // Unlock EEPROM for writing configuration (required before changing limits)
+    // Address 55 (0x37) = Lock/Unlock. Write 0 to unlock.
+    async unlockEEPROM(id: number) {
+        await this.runExclusive(async () => {
+            const params = [55, 0]; // Address 55, Value 0 (unlock)
+            const packet = this.createPacket(id, INST_WRITE, params);
+            await this.connection.write(packet);
+        });
+    }
+
+    // Lock EEPROM after writing configuration
+    async lockEEPROM(id: number) {
+        await this.runExclusive(async () => {
+            const params = [55, 1]; // Address 55, Value 1 (lock)
+            const packet = this.createPacket(id, INST_WRITE, params);
+            await this.connection.write(packet);
+        });
+    }
+
+    // Read position limits (Min at address 9-10, Max at address 11-12)
+    async readPositionLimits(id: number): Promise<{ min: number; max: number }> {
+        return this.runExclusive(async () => {
+            // Read 4 bytes starting at address 9
+            const addr = 9;
+            const readLen = 4;
+
+            const params = [addr, readLen];
+            const packet = this.createPacket(id, INST_READ, params);
+            await this.connection.write(packet);
+
+            // Expected response: 6 header bytes + 4 data bytes = 10 bytes
+            const res = await this.readPacket(id, 10);
+
+            if (res && res.length >= 10) {
+                const minLow = res[5];
+                const minHigh = res[6];
+                const maxLow = res[7];
+                const maxHigh = res[8];
+                return {
+                    min: (minHigh << 8) | minLow,
+                    max: (maxHigh << 8) | maxLow
+                };
+            }
+
+            return { min: 0, max: 4095 }; // Default fallback
+        });
+    }
+
+    // Set position limits (Min at address 9-10, Max at address 11-12)
+    // IMPORTANT: Must call unlockEEPROM first, and lockEEPROM after
+    async setPositionLimits(id: number, min: number, max: number) {
+        await this.runExclusive(async () => {
+            // Write 4 bytes starting at address 9
+            const params = [9];
+            // Min position (2 bytes, little endian)
+            params.push(min & 0xFF);
+            params.push((min >> 8) & 0xFF);
+            // Max position (2 bytes, little endian)
+            params.push(max & 0xFF);
+            params.push((max >> 8) & 0xFF);
+
+            const packet = this.createPacket(id, INST_WRITE, params);
+            await this.connection.write(packet);
+        });
     }
 }

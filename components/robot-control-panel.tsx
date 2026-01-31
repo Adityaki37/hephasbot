@@ -16,7 +16,8 @@ export function RobotControlPanel() {
         startCalibration,
         finishCalibration,
         moveJoint,
-        moveJointRel
+        moveJointRel,
+        calibrationLimits
     } = useRobot();
 
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -82,9 +83,9 @@ export function RobotControlPanel() {
                 e.preventDefault();
             }
 
-            // Helper to move relative (5%)
+            // Helper to move relative (2%)
             const moveRel = (idx: number, dir: number) => {
-                moveJointRel(idx, 5 * dir);
+                moveJointRel(idx, 2 * dir);
             };
 
             switch (e.key.toLowerCase()) {
@@ -108,9 +109,11 @@ export function RobotControlPanel() {
 
     const isControlsEnabled = connected && calibrationState === 'rdy';
 
-    // Helper for buttons (5%)
+    // Helper for buttons (2%)
     const manualMove = (idx: number, dir: number) => {
-        moveJointRel(idx, 5 * dir);
+        // Use logic similar to context's startManualMove for consistent "bit by bit" feel
+        // For single click, just move 2%
+        moveJointRel(idx, 2 * dir);
     };
 
     return (
@@ -161,7 +164,7 @@ export function RobotControlPanel() {
                 </div>
             )}
 
-            {connected && calibrationState === 'cal' && (
+            {(connected && (calibrationState === 'cal' || calibrationState === 'finishing')) && (
                 <div className="mb-6 p-4 bg-blue-500/10 border border-blue-500/20 rounded-xl flex items-center justify-between animate-pulse">
                     <div className="flex items-center gap-3">
                         <div className="p-2 bg-blue-500/20 rounded-lg">
@@ -172,9 +175,12 @@ export function RobotControlPanel() {
                             <p className="text-xs text-blue-200/60">Move all robot joints to their limits manually.</p>
                         </div>
                     </div>
-                    <Button onClick={handleFinishCalibration} className="bg-blue-600 hover:bg-blue-700">
-                        <Check className="mr-2 h-4 w-4" />
-                        Finish Calibration
+                    <Button
+                        onClick={handleFinishCalibration}
+                        disabled={calibrationState === 'finishing'}
+                        className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                        <Check className={`mr-2 h-4 w-4 ${calibrationState === 'finishing' ? 'animate-spin' : ''}`} />
+                        {calibrationState === 'finishing' ? 'Finishing...' : 'Finish Calibration'}
                     </Button>
                 </div>
             )}
@@ -221,22 +227,45 @@ export function RobotControlPanel() {
                                     <Sliders className="w-4 h-4" /> Joint Control (Teleop)
                                 </h4>
                                 <div className="space-y-6">
-                                    {[0, 1, 2, 3, 4, 5].map((joint) => (
-                                        <div key={joint} className="space-y-2">
-                                            <div className="flex justify-between text-xs text-zinc-500">
-                                                <span>Joint {joint + 1}</span>
-                                                <span className="font-mono text-zinc-300">{jointVals[joint]?.toFixed(0)}</span>
+                                    {[0, 1, 2, 3, 4, 5].map((joint) => {
+                                        const limits = calibrationLimits[joint] || { min: 0, max: 4095 };
+                                        const sliderVal = jointVals[joint] || 0;
+
+                                        // Calculate current position differently during calibration vs normal
+                                        let currentPos: number;
+                                        if (calibrationState === 'cal') {
+                                            // During calibration, slider is set as: ((val - 2048) / 2048) * 100
+                                            // So reverse: val = (sliderVal / 100) * 2048 + 2048
+                                            currentPos = Math.floor((sliderVal / 100) * 2048 + 2048);
+                                        } else {
+                                            // Normal operation: use calibrated limits
+                                            const range = limits.max - limits.min;
+                                            const normalized = (sliderVal + 100) / 200;
+                                            currentPos = Math.floor(limits.min + (normalized * range));
+                                        }
+
+                                        return (
+                                            <div key={joint} className="space-y-2">
+                                                <div className="flex justify-between text-xs text-zinc-500">
+                                                    <span>Joint {joint + 1}</span>
+                                                    <div className="flex gap-2 items-center">
+                                                        <span className="text-[10px] text-zinc-600 font-mono">
+                                                            {limits.min}←<span className="text-emerald-400">{currentPos}</span>→{limits.max}
+                                                        </span>
+                                                        <span className="font-mono text-zinc-300">{sliderVal?.toFixed(0)}%</span>
+                                                    </div>
+                                                </div>
+                                                <input
+                                                    type="range"
+                                                    min="-100" max="100"
+                                                    value={jointVals[joint]}
+                                                    disabled={!isControlsEnabled && calibrationState !== 'cal'}
+                                                    onChange={(e) => handleJointChange(joint, Number(e.target.value))}
+                                                    className={`w-full h-2 rounded-lg appearance-none cursor-pointer transition-all ${isControlsEnabled ? "bg-zinc-800 accent-primary hover:accent-primary/80" : "bg-zinc-800/50 accent-zinc-600 cursor-not-allowed"}`}
+                                                />
                                             </div>
-                                            <input
-                                                type="range"
-                                                min="-100" max="100"
-                                                value={jointVals[joint]}
-                                                disabled={!isControlsEnabled && calibrationState !== 'cal'}
-                                                onChange={(e) => handleJointChange(joint, Number(e.target.value))}
-                                                className={`w-full h-2 rounded-lg appearance-none cursor-pointer transition-all ${isControlsEnabled ? "bg-zinc-800 accent-primary hover:accent-primary/80" : "bg-zinc-800/50 accent-zinc-600 cursor-not-allowed"}`}
-                                            />
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             </div>
 
