@@ -80,18 +80,6 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Robot Control Section (Command Center) */}
-        <section id="control" className="w-full py-20 px-4 border-t border-border bg-card/30 backdrop-blur-sm">
-          <div className="max-w-7xl mx-auto">
-            <div className="text-center mb-16">
-              <h2 className="text-3xl font-bold mb-4 tracking-tight">Command Center</h2>
-              <p className="text-muted-foreground">Direct interface to your local robot hardware.</p>
-            </div>
-
-            <RobotControlPanel />
-          </div>
-        </section>
-
         {/* Features Grid */}
         <section id="features" className="py-24 px-6 max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8">
           <div className="p-8 rounded-xl border border-border bg-card hover:bg-accent/50 transition-colors group">
@@ -120,6 +108,18 @@ export default function Home() {
             <p className="text-muted-foreground leading-relaxed">
               Collect datasets directly from teleop sessions. Compatible with LeRobot training pipelines out of the box.
             </p>
+          </div>
+        </section>
+
+        {/* Robot Control Section (Command Center) */}
+        <section id="control" className="w-full py-20 px-4 border-t border-border bg-card/30 backdrop-blur-sm">
+          <div className="max-w-7xl mx-auto">
+            <div className="text-center mb-16">
+              <h2 className="text-3xl font-bold mb-4 tracking-tight">Command Center</h2>
+              <p className="text-muted-foreground">Direct interface to your local robot hardware.</p>
+            </div>
+
+            <RobotControlPanel />
           </div>
         </section>
 

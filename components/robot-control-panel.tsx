@@ -10,6 +10,82 @@ import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { VisualKeyboard } from "@/components/visual-keyboard";
 import { GamepadVisualizer } from "@/components/gamepad-visualizer";
+import { ResizableSplitPane } from "@/components/resizable-split-pane";
+
+// function RobotControlPanel continued...
+
+function CameraGrid({
+    cameras,
+    onRemove,
+    onAdd
+}: {
+    cameras: { id: string, label?: string, stream: MediaStream }[],
+    onRemove: (id: string) => void,
+    onAdd: () => void
+}) {
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [useColumns, setUseColumns] = useState(true);
+
+    // Use ResizeObserver to dynamically determine best layout
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!container || cameras.length < 2) return;
+
+        const observer = new ResizeObserver((entries) => {
+            const entry = entries[0];
+            if (!entry) return;
+
+            const { width, height } = entry.contentRect;
+            const aspectRatio = width / height;
+
+            // For 2 cameras: if container is wide (aspect > 1.2), use columns; otherwise stack
+            // For 3+ cameras: if container is wide (aspect > 1.5), use 2 columns; otherwise stack
+            if (cameras.length === 2) {
+                setUseColumns(aspectRatio > 1.2);
+            } else {
+                // For 3+ cameras, use 2 columns when wide enough
+                setUseColumns(aspectRatio > 1.0 && width > 400);
+            }
+        });
+
+        observer.observe(container);
+        return () => observer.disconnect();
+    }, [cameras.length]);
+
+    // Determine grid class based on camera count and layout mode
+    const getLayoutClass = () => {
+        if (cameras.length === 0 || cameras.length === 1) {
+            return 'flex items-center justify-center';
+        }
+        if (useColumns) {
+            return 'grid grid-cols-2 gap-3 place-items-center auto-rows-fr';
+        }
+        return 'flex flex-col gap-3 items-center justify-center';
+    };
+
+    return (
+        <div
+            ref={containerRef}
+            className={`w-full h-full min-h-[200px] bg-black/40 rounded-xl border border-zinc-800 p-3 ${getLayoutClass()}`}
+        >
+            {cameras.length === 0 ? (
+                <div className="flex flex-col items-center justify-center text-center p-6 border border-dashed border-zinc-800 rounded-lg">
+                    <div className="w-14 h-14 bg-zinc-900 rounded-full flex items-center justify-center mx-auto mb-3">
+                        <Video className="w-7 h-7 text-zinc-700" />
+                    </div>
+                    <p className="text-zinc-500 text-sm mb-3">No cameras connected</p>
+                    <Button onClick={onAdd} variant="outline" size="sm">
+                        <Plus className="mr-2 h-3 w-3" /> Add Camera
+                    </Button>
+                </div>
+            ) : (
+                cameras.map((cam) => (
+                    <CameraFeed key={cam.id} cam={cam} onRemove={onRemove} />
+                ))
+            )}
+        </div>
+    );
+}
 
 export function RobotControlPanel() {
     const {
@@ -45,10 +121,22 @@ export function RobotControlPanel() {
         setSpeedMultiplier
     } = useRobot();
 
-    const videoRef = useRef<HTMLVideoElement>(null);
-    const [cameraActive, setCameraActive] = useState(false);
-    const [activeStream, setActiveStream] = useState<MediaStream | null>(null);
+    // Multi-Camera State
+    const [cameras, setCameras] = useState<{ id: string, label?: string, stream: MediaStream }[]>([]);
     const [activeTab, setActiveTab] = useState("teleop");
+    const [showCamerasInTabs, setShowCamerasInTabs] = useState(true);
+
+    // Resizable Split Pane State
+    const [splitWidth, setSplitWidth] = useState(50); // percentage for controls panel
+
+    // Calculate scale based on split width and camera visibility
+    // When cameras are off, controls get full width -> larger scale
+    // When cameras are on, scale based on split width (more responsive)
+    const controlScale = showCamerasInTabs ? Math.max(0.6, (splitWidth / 50) * 0.9) : 1.3;
+
+    // Camera Selection State
+    const [showCameraSelector, setShowCameraSelector] = useState(false);
+    const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([]);
 
     // --- LOGIC: Active Tab determines Active Interaction Mode ---
 
@@ -73,43 +161,51 @@ export function RobotControlPanel() {
     });
 
     // 3. Keyboard Logic
-    // Handled purely by VisualKeyboard component now for the 'keyboard' tab.
-    // We remove the global listener here to avoid duplication/conflict when the tab is active.
-    // However, if we want keyboard to work GLOBALLY (outside the tab), we should keep it or make VisualKeyboard hidden?
-    // The requirement implies visual feedback, so likely we only want it when looking at the tab.
-    // If users want global keys, they can use the hook logic. For now, let's delegate to the component in the tab.
+    // Handled purely by VisualKeyboard component.
 
 
     // --- Camera Logic ---
-    useEffect(() => {
-        if (activeStream && videoRef.current) {
-            videoRef.current.srcObject = activeStream;
-            videoRef.current.play().catch(console.error);
+    const startAddCamera = async () => {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+            console.warn("Media Devices API not available");
+            return;
         }
-    }, [activeStream, cameraActive]);
+        try {
+            await navigator.mediaDevices.getUserMedia({ video: true }); // Request permission first
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const videoDevices = devices.filter(d => d.kind === 'videoinput');
+            setAvailableDevices(videoDevices);
+            setShowCameraSelector(true);
+        } catch (e) {
+            console.error("Failed to enumerate devices:", e);
+        }
+    };
 
-    const toggleCamera = async () => {
-        if (cameraActive) {
-            if (activeStream) activeStream.getTracks().forEach(t => t.stop());
-            setActiveStream(null);
-            setCameraActive(false);
-        } else {
-            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-                console.warn("Media Devices API not available");
-                return;
-            }
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: { width: { ideal: 640 }, height: { ideal: 480 } }
-                });
-                setActiveStream(stream);
-                setCameraActive(true);
-            } catch (e) {
-                console.error("Camera access failed:", e);
-                setCameraActive(false);
-                setActiveStream(null);
-            }
+    const addCamera = async (deviceId: string, label: string) => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: {
+                    deviceId: { exact: deviceId },
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                }
+            });
+            const id = crypto.randomUUID();
+            setCameras(prev => [...prev, { id, label, stream }]);
+            setShowCameraSelector(false);
+        } catch (e) {
+            console.error("Camera access failed:", e);
         }
+    };
+
+    const removeCamera = (id: string) => {
+        setCameras(prev => {
+            const cam = prev.find(c => c.id === id);
+            if (cam) {
+                cam.stream.getTracks().forEach(t => t.stop());
+            }
+            return prev.filter(c => c.id !== id);
+        });
     };
 
     const handleJointChange = (jointIdx: number, val: number) => {
@@ -121,7 +217,40 @@ export function RobotControlPanel() {
     const robotCount = Object.keys(robots).length;
 
     return (
-        <div className="w-full max-w-6xl mx-auto p-4 sm:p-6 lg:p-8 bg-zinc-950/50 rounded-2xl border border-zinc-800 backdrop-blur-xl flex flex-col min-h-[800px]">
+        <div className="w-full max-w-6xl mx-auto p-4 sm:p-6 lg:p-8 bg-zinc-950/50 rounded-2xl border border-zinc-800 backdrop-blur-xl flex flex-col min-h-[800px] relative">
+
+            {/* Camera Selection Modal */}
+            {showCameraSelector && (
+                <div className="absolute inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm rounded-2xl p-4">
+                    <div className="bg-zinc-900 border border-zinc-800 rounded-xl max-w-md w-full p-6 shadow-2xl">
+                        <h3 className="text-xl font-bold text-white mb-4">Select Camera</h3>
+                        <div className="space-y-2 mb-6 max-h-[300px] overflow-y-auto">
+                            {availableDevices.map((device, idx) => (
+                                <Button
+                                    key={device.deviceId || idx}
+                                    variant="outline"
+                                    className="w-full justify-start text-left font-normal"
+                                    onClick={() => addCamera(device.deviceId, device.label || `Camera ${idx + 1}`)}
+                                >
+                                    <Video className="mr-2 h-4 w-4 text-zinc-500" />
+                                    {device.label || `Camera ${idx + 1}`}
+                                </Button>
+                            ))}
+                            {availableDevices.length === 0 && (
+                                <p className="text-zinc-500 text-sm text-center py-4">No video devices found.</p>
+                            )}
+                        </div>
+                        <Button
+                            variant="secondary"
+                            className="w-full"
+                            onClick={() => setShowCameraSelector(false)}
+                        >
+                            Cancel
+                        </Button>
+                    </div>
+                </div>
+            )}
+
             {/* Header: Multi-Robot Manager */}
             <div className="flex flex-col sm:flex-row items-center justify-between mb-6 gap-4 border-b border-zinc-800 pb-6">
                 <div className="flex items-center gap-4">
@@ -192,13 +321,13 @@ export function RobotControlPanel() {
                     </Button>
 
                     <Button
-                        onClick={toggleCamera}
+                        onClick={startAddCamera}
                         variant="outline"
                         size="sm"
-                        className={`h-9 ${cameraActive ? "bg-red-500/10 text-red-500 border-red-500/30" : ""}`}
+                        className="h-9"
                     >
                         <Camera className="mr-2 h-3 w-3" />
-                        {cameraActive ? "Stop" : "Cam"}
+                        + Add Camera
                     </Button>
                 </div>
             </div>
@@ -250,10 +379,86 @@ export function RobotControlPanel() {
 
 
                     {/* TELEOP TAB */}
-                    <TabsContent value="teleop" className="h-full mt-0 space-y-6">
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 h-full">
-                            <div className="space-y-4">
-                                <h3 className="font-semibold text-zinc-300 flex items-center gap-2">
+                    <TabsContent value="teleop" className="h-full mt-0 flex flex-col">
+                        <div className="w-full flex justify-end px-4 mb-4">
+                            <div className="flex items-center gap-2">
+                                <Switch
+                                    id="show-cam-teleop"
+                                    checked={showCamerasInTabs}
+                                    onCheckedChange={setShowCamerasInTabs}
+                                />
+                                <Label htmlFor="show-cam-teleop" className="text-zinc-400 text-xs">Show Cameras</Label>
+                            </div>
+                        </div>
+
+                        {showCamerasInTabs ? (
+                            <ResizableSplitPane
+                                defaultLeftWidth={splitWidth}
+                                minLeftWidth={35}
+                                maxLeftWidth={70}
+                                onResize={setSplitWidth}
+                                className="flex-1"
+                                left={
+                                    <div className="h-full flex flex-col p-4 overflow-auto">
+                                        <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
+                                            <Sliders className="w-4 h-4" /> Manual Joint Control
+                                            {syncControl && <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded ml-2">SYNC ON</span>}
+                                            {calibrationState === 'cal' && (
+                                                <div className="ml-auto flex items-center gap-2">
+                                                    <span className="text-xs text-yellow-500 animate-pulse font-mono">CALIBRATION MODE</span>
+                                                    <Button onClick={finishCalibration} size="sm" className="h-7 bg-blue-600 hover:bg-blue-700 text-white text-xs">
+                                                        Finish Calibration
+                                                    </Button>
+                                                </div>
+                                            )}
+                                        </h3>
+                                        <div className="space-y-5">
+                                            {[0, 1, 2, 3, 4, 5].map((joint) => {
+                                                const limits = calibrationLimits[joint] || { min: 0, max: 4095 };
+                                                const sliderVal = jointVals[joint] || 0;
+                                                let currentPos = 0;
+                                                if (calibrationState === 'cal' || activeTab === 'free') {
+                                                    currentPos = Math.floor((sliderVal + 100) * 20.48);
+                                                } else {
+                                                    const range = limits.max - limits.min;
+                                                    const normalized = (sliderVal + 100) / 200;
+                                                    currentPos = Math.floor(limits.min + (normalized * range));
+                                                }
+
+                                                return (
+                                                    <div key={joint} className="space-y-1.5">
+                                                        <div className="flex justify-between text-xs text-zinc-500">
+                                                            <span className="font-mono uppercase">Joint {joint + 1}</span>
+                                                            <span className="font-mono text-zinc-300">{currentPos}</span>
+                                                        </div>
+                                                        <input
+                                                            type="range"
+                                                            min="-100" max="100"
+                                                            value={jointVals[joint]}
+                                                            onChange={(e) => handleJointChange(joint, Number(e.target.value))}
+                                                            disabled={calibrationState !== 'rdy' && activeTab !== 'free'}
+                                                            className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-primary"
+                                                        />
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
+                                }
+                                right={
+                                    <div className="h-full flex flex-col p-4 overflow-auto">
+                                        <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
+                                            <Video className="w-4 h-4" /> Camera Feeds
+                                        </h3>
+                                        <div className="flex-1 min-h-[300px]">
+                                            <CameraGrid cameras={cameras} onRemove={removeCamera} onAdd={startAddCamera} />
+                                        </div>
+                                    </div>
+                                }
+                            />
+                        ) : (
+                            <div className="flex-1 p-4">
+                                <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
                                     <Sliders className="w-4 h-4" /> Manual Joint Control
                                     {syncControl && <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded ml-2">SYNC ON</span>}
                                     {calibrationState === 'cal' && (
@@ -265,11 +470,10 @@ export function RobotControlPanel() {
                                         </div>
                                     )}
                                 </h3>
-                                <div className="space-y-5 pr-2">
+                                <div className="space-y-5 max-w-xl mx-auto">
                                     {[0, 1, 2, 3, 4, 5].map((joint) => {
                                         const limits = calibrationLimits[joint] || { min: 0, max: 4095 };
                                         const sliderVal = jointVals[joint] || 0;
-                                        // Display logic
                                         let currentPos = 0;
                                         if (calibrationState === 'cal' || activeTab === 'free') {
                                             currentPos = Math.floor((sliderVal + 100) * 20.48);
@@ -298,68 +502,202 @@ export function RobotControlPanel() {
                                     })}
                                 </div>
                             </div>
-
-                            {/* Visualizer Area */}
-                            <div className="bg-black rounded-xl border border-zinc-800 flex items-center justify-center overflow-hidden relative group">
-                                {cameraActive ? (
-                                    <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-                                ) : (
-                                    <div className="text-center">
-                                        <div className="w-16 h-16 bg-zinc-900 rounded-full flex items-center justify-center mx-auto mb-3">
-                                            <Video className="w-8 h-8 text-zinc-700" />
-                                        </div>
-                                        <p className="text-zinc-600 text-sm">Camera Feed Inactive</p>
-                                    </div>
-                                )}
-                            </div>
-                        </div>
+                        )}
                     </TabsContent>
 
                     {/* KEYBOARD TAB */}
-                    <TabsContent value="keyboard" className="h-full mt-0 flex flex-col items-center justify-center space-y-8">
-                        <div className="text-center space-y-2">
-                            <h3 className="text-xl font-bold text-white mb-2">Keyboard Control</h3>
-                            <p className="text-zinc-500 text-sm">Use keys or click buttons below</p>
+                    <TabsContent value="keyboard" className="h-full mt-0 flex flex-col">
+                        <div className="w-full flex justify-end px-4 mb-4">
+                            <div className="flex items-center gap-2">
+                                <Switch
+                                    id="show-cam-kbd"
+                                    checked={showCamerasInTabs}
+                                    onCheckedChange={setShowCamerasInTabs}
+                                />
+                                <Label htmlFor="show-cam-kbd" className="text-zinc-400 text-xs">Show Cameras</Label>
+                            </div>
                         </div>
-                        <VisualKeyboard
-                            onMoveStart={startManualMove}
-                            onMoveStop={stopManualMove}
-                        />
+
+                        {showCamerasInTabs ? (
+                            <ResizableSplitPane
+                                defaultLeftWidth={splitWidth}
+                                minLeftWidth={35}
+                                maxLeftWidth={70}
+                                onResize={setSplitWidth}
+                                className="flex-1"
+                                left={
+                                    <div className="h-full flex flex-col items-center justify-center p-4 overflow-hidden">
+                                        <div className="text-center space-y-2 mb-4">
+                                            <h3 className="text-xl font-bold text-white">Keyboard Control</h3>
+                                            <p className="text-zinc-500 text-sm">Use keys or click buttons below</p>
+                                        </div>
+                                        <VisualKeyboard
+                                            onMoveStart={startManualMove}
+                                            onMoveStop={stopManualMove}
+                                            scale={controlScale}
+                                        />
+                                    </div>
+                                }
+                                right={
+                                    <div className="h-full flex flex-col p-4 overflow-auto">
+                                        <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
+                                            <Video className="w-4 h-4" /> Camera Feeds
+                                        </h3>
+                                        <div className="flex-1 min-h-[300px]">
+                                            <CameraGrid cameras={cameras} onRemove={removeCamera} onAdd={startAddCamera} />
+                                        </div>
+                                    </div>
+                                }
+                            />
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center">
+                                <div className="text-center space-y-2 mb-6">
+                                    <h3 className="text-2xl font-bold text-white">Keyboard Control</h3>
+                                    <p className="text-zinc-500 text-sm">Use keys or click buttons below</p>
+                                </div>
+                                <VisualKeyboard
+                                    onMoveStart={startManualMove}
+                                    onMoveStop={stopManualMove}
+                                    scale={controlScale}
+                                />
+                            </div>
+                        )}
                     </TabsContent>
 
                     {/* GAMEPAD TAB */}
-                    <TabsContent value="gamepad" className="h-full mt-0 flex flex-col items-center justify-center space-y-8">
-                        <div className="text-center space-y-2">
-                            <h3 className="text-xl font-bold text-white mb-2">Gamepad Status</h3>
-                            <p className="text-zinc-500 text-sm">Visual feedback of connected controller</p>
+                    <TabsContent value="gamepad" className="h-full mt-0 flex flex-col">
+                        <div className="w-full flex justify-end px-4 mb-4">
+                            <div className="flex items-center gap-2">
+                                <Switch
+                                    id="show-cam-gamepad"
+                                    checked={showCamerasInTabs}
+                                    onCheckedChange={setShowCamerasInTabs}
+                                />
+                                <Label htmlFor="show-cam-gamepad" className="text-zinc-400 text-xs">Show Cameras</Label>
+                            </div>
                         </div>
-                        <div className="relative w-full flex justify-center">
-                            {!gamepadState.connected && (
-                                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/80 backdrop-blur-sm rounded-2xl">
-                                    <Gamepad2 className="w-12 h-12 text-zinc-600 mb-4 animate-pulse" />
-                                    <h3 className="text-xl font-bold text-zinc-400 mb-2">Gamepad Not Detected</h3>
-                                    <p className="text-zinc-500 max-w-sm mb-6 text-center">Press any button on your controller to wake it up.</p>
+
+                        {showCamerasInTabs ? (
+                            <ResizableSplitPane
+                                defaultLeftWidth={splitWidth}
+                                minLeftWidth={35}
+                                maxLeftWidth={70}
+                                onResize={setSplitWidth}
+                                className="flex-1"
+                                left={
+                                    <div className="h-full flex flex-col items-center justify-center px-6 py-4">
+                                        <div className="text-center space-y-2 mb-4">
+                                            <h3 className="text-xl font-bold text-white">Gamepad Status</h3>
+                                            <p className="text-zinc-500 text-sm">Visual feedback of connected controller</p>
+                                        </div>
+                                        <div className="relative flex-shrink-0">
+                                            {!gamepadState.connected && (
+                                                <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/80 backdrop-blur-sm rounded-2xl">
+                                                    <Gamepad2 className="w-12 h-12 text-zinc-600 mb-4 animate-pulse" />
+                                                    <h3 className="text-xl font-bold text-zinc-400 mb-2">Gamepad Not Detected</h3>
+                                                    <p className="text-zinc-500 max-w-sm mb-6 text-center">Press any button on your controller to wake it up.</p>
+                                                </div>
+                                            )}
+                                            <GamepadVisualizer state={gamepadState} scale={controlScale} />
+                                        </div>
+                                    </div>
+                                }
+                                right={
+                                    <div className="h-full flex flex-col p-4 overflow-auto">
+                                        <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
+                                            <Video className="w-4 h-4" /> Camera Feeds
+                                        </h3>
+                                        <div className="flex-1 min-h-[300px]">
+                                            <CameraGrid cameras={cameras} onRemove={removeCamera} onAdd={startAddCamera} />
+                                        </div>
+                                    </div>
+                                }
+                            />
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center">
+                                <div className="text-center space-y-2 mb-6">
+                                    <h3 className="text-2xl font-bold text-white">Gamepad Status</h3>
+                                    <p className="text-zinc-500 text-sm">Visual feedback of connected controller</p>
                                 </div>
-                            )}
-                            <GamepadVisualizer state={gamepadState} />
-                        </div>
+                                <div className="relative">
+                                    {!gamepadState.connected && (
+                                        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/80 backdrop-blur-sm rounded-2xl">
+                                            <Gamepad2 className="w-12 h-12 text-zinc-600 mb-4 animate-pulse" />
+                                            <h3 className="text-xl font-bold text-zinc-400 mb-2">Gamepad Not Detected</h3>
+                                            <p className="text-zinc-500 max-w-sm mb-6 text-center">Press any button on your controller to wake it up.</p>
+                                        </div>
+                                    )}
+                                    <GamepadVisualizer state={gamepadState} scale={controlScale} />
+                                </div>
+                            </div>
+                        )}
                     </TabsContent>
 
                     {/* FREE MODE (LEAD THROUGH) TAB */}
-                    <TabsContent value="free" className="h-full mt-0 flex flex-col items-center justify-center space-y-8">
-                        <div className="text-center space-y-2">
-                            <div className="inline-flex items-center justify-center p-4 bg-purple-500/10 rounded-full mb-4 animate-bounce">
-                                <Hand className="w-12 h-12 text-purple-400" />
+                    <TabsContent value="free" className="h-full mt-0 flex flex-col">
+                        <div className="w-full flex justify-end px-4 mb-4">
+                            <div className="flex items-center gap-2">
+                                <Switch
+                                    id="show-cam-free"
+                                    checked={showCamerasInTabs}
+                                    onCheckedChange={setShowCamerasInTabs}
+                                />
+                                <Label htmlFor="show-cam-free" className="text-zinc-400 text-xs">Show Cameras</Label>
                             </div>
-                            <h3 className="text-3xl font-bold text-purple-400">Lead Through Mode</h3>
-                            <p className="text-purple-200/60 max-w-lg mx-auto text-lg">
-                                Motors are relaxed. Sync is {syncControl ? "ON" : "OFF"}.<br />
-                                Move the robot arm physically to desired positions.
-                            </p>
                         </div>
-                        <div className="flex gap-4">
-                            {isRecording && <div className="px-4 py-2 bg-red-500/20 text-red-400 rounded-full border border-red-500/50 animate-pulse font-mono">RECORDING TRAJECTORY...</div>}
-                        </div>
+
+                        {showCamerasInTabs ? (
+                            <ResizableSplitPane
+                                defaultLeftWidth={splitWidth}
+                                minLeftWidth={35}
+                                maxLeftWidth={70}
+                                onResize={setSplitWidth}
+                                className="flex-1"
+                                left={
+                                    <div className="h-full flex flex-col items-center justify-center p-4 overflow-hidden">
+                                        <div className="text-center space-y-2">
+                                            <div className="inline-flex items-center justify-center p-4 bg-purple-500/10 rounded-full mb-4 animate-bounce">
+                                                <Hand className="w-12 h-12 text-purple-400" />
+                                            </div>
+                                            <h3 className="text-3xl font-bold text-purple-400">Lead Through Mode</h3>
+                                            <p className="text-purple-200/60 max-w-lg mx-auto text-lg">
+                                                Motors are relaxed. Sync is {syncControl ? "ON" : "OFF"}.<br />
+                                                Move the robot arm physically to desired positions.
+                                            </p>
+                                        </div>
+                                        <div className="flex gap-4 mt-4">
+                                            {isRecording && <div className="px-4 py-2 bg-red-500/20 text-red-400 rounded-full border border-red-500/50 animate-pulse font-mono">RECORDING TRAJECTORY...</div>}
+                                        </div>
+                                    </div>
+                                }
+                                right={
+                                    <div className="h-full flex flex-col p-4 overflow-auto">
+                                        <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
+                                            <Video className="w-4 h-4" /> Camera Feeds
+                                        </h3>
+                                        <div className="flex-1 min-h-[300px]">
+                                            <CameraGrid cameras={cameras} onRemove={removeCamera} onAdd={startAddCamera} />
+                                        </div>
+                                    </div>
+                                }
+                            />
+                        ) : (
+                            <div className="flex-1 flex flex-col items-center justify-center">
+                                <div className="text-center space-y-2">
+                                    <div className="inline-flex items-center justify-center p-4 bg-purple-500/10 rounded-full mb-4 animate-bounce">
+                                        <Hand className="w-12 h-12 text-purple-400" />
+                                    </div>
+                                    <h3 className="text-3xl font-bold text-purple-400">Lead Through Mode</h3>
+                                    <p className="text-purple-200/60 max-w-lg mx-auto text-lg">
+                                        Motors are relaxed. Sync is {syncControl ? "ON" : "OFF"}.<br />
+                                        Move the robot arm physically to desired positions.
+                                    </p>
+                                </div>
+                                <div className="flex gap-4 mt-4">
+                                    {isRecording && <div className="px-4 py-2 bg-red-500/20 text-red-400 rounded-full border border-red-500/50 animate-pulse font-mono">RECORDING TRAJECTORY...</div>}
+                                </div>
+                            </div>
+                        )}
                     </TabsContent>
 
                     {/* SETTINGS TAB */}
@@ -380,9 +718,25 @@ export function RobotControlPanel() {
                             <div className="p-6 bg-zinc-900/30 rounded-xl border border-zinc-800">
                                 <h3 className="text-lg font-medium mb-4 text-white flex items-center gap-2"><Cpu className="w-5 h-5" /> Diagnostics</h3>
                                 {activeRobotId && (
-                                    <Button onClick={() => disconnectRobot(activeRobotId)} variant="destructive" className="w-full justify-start">
-                                        <Unlink className="mr-2 h-4 w-4" /> Disconnect This Robot
+                                    <Button onClick={() => disconnectRobot(activeRobotId)} variant="destructive" className="w-full justify-start mb-2">
+                                        <Unlink className="mr-2 h-4 w-4" /> Disconnect {robots[activeRobotId]?.name}
                                     </Button>
+                                )}
+
+                                {cameras.length > 0 && (
+                                    <div className="mt-4 pt-4 border-t border-zinc-800">
+                                        <h4 className="text-sm font-medium text-zinc-400 mb-2">Connected Cameras</h4>
+                                        <div className="space-y-2">
+                                            {cameras.map(cam => (
+                                                <div key={cam.id} className="flex items-center justify-between text-sm bg-black/40 p-2 rounded">
+                                                    <span className="text-zinc-300 truncate max-w-[150px]">{cam.label}</span>
+                                                    <Button onClick={() => removeCamera(cam.id)} size="sm" variant="ghost" className="h-6 w-6 p-0 text-red-500 hover:text-red-400 hover:bg-red-500/10">
+                                                        <Unlink className="w-3 h-3" />
+                                                    </Button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
                                 )}
                             </div>
                         </div>
@@ -431,6 +785,45 @@ export function RobotControlPanel() {
                         PLAY
                     </Button>
                 </div>
+            </div>
+        </div>
+    );
+}
+
+function CameraFeed({ cam, onRemove }: { cam: { id: string, label?: string, stream: MediaStream }, onRemove: (id: string) => void }) {
+    const videoRef = useRef<HTMLVideoElement>(null);
+
+    useEffect(() => {
+        const video = videoRef.current;
+        if (video && cam.stream) {
+            video.srcObject = cam.stream;
+            video.play().catch(e => {
+                if (e.name !== 'AbortError') console.error("Video play failed:", e);
+            });
+        }
+    }, [cam.stream]);
+
+    return (
+        <div className="relative group rounded-lg overflow-hidden border border-zinc-800 bg-black w-full max-w-full" style={{ aspectRatio: '16/9' }}>
+            <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full h-full object-cover"
+            />
+            <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                <Button
+                    onClick={() => onRemove(cam.id)}
+                    variant="destructive"
+                    size="icon"
+                    className="h-7 w-7 rounded-full shadow-lg"
+                >
+                    <Unlink className="h-3.5 w-3.5" />
+                </Button>
+            </div>
+            <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 backdrop-blur rounded text-[10px] font-mono text-zinc-400 max-w-[90%] truncate">
+                {cam.label || `CAM ${cam.id.slice(0, 4)}`}
             </div>
         </div>
     );
