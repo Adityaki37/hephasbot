@@ -7,14 +7,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "setup": "bun install && node scripts/setup-env.mjs && bunx convex dev"
+    "setup": "bun install"
   },
   "dependencies": {
     "@base-ui/react": "^1.1.0",
-    "@workos-inc/authkit-nextjs": "^2.13.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "convex": "^1.31.6",
     "lucide-react": "^0.563.0",
     "next": "16.1.6",
     "react": "19.2.3",

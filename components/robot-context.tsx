@@ -41,7 +41,7 @@ interface RobotContextType {
 
     // Active Robot Proxies (or Unified Actions)
     // These generally apply to the active robot, or ALL if syncControl is true for movements.
-    connect: () => Promise<void>; // Legacy alias for addRobot
+    connect: () => Promise<void>;
 
     // Speed
     setSpeedMultiplier: (speed: number) => void;
@@ -83,7 +83,6 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
     const [logs, setLogs] = useState<string[]>([]);
 
-    // GLOBAL / ACTIVE STATE (Legacy wrappers)
     const [isRecording, setIsRecording] = useState(false);
     const [isPlaying, setIsPlaying] = useState(false);
     const [recordedTraj, setRecordedTraj] = useState<number[][]>([]); // For the active robot
@@ -591,9 +590,7 @@ export function useRobot() {
     const context = useContext(RobotContext);
     if (!context) throw new Error("useRobot must be used within RobotProvider");
 
-    // BACKWARD COMPATIBILITY LAYER
-    // Many components confirm strictly to 'connected', 'jointVals', etc.
-    // We map the ACTIVE robot's state to these top-level properties.
+    // Map ACTIVE robot state to top-level properties
     const active = context.activeRobot;
 
     return {
