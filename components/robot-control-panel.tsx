@@ -1,10 +1,11 @@
-import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink } from "lucide-react";
+import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink, Maximize2, Minimize2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRobot } from "@/components/robot-context";
 import { useGamepad } from "@/hooks/use-gamepad";
+import useMeasure from "react-use-measure";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
@@ -127,16 +128,55 @@ export function RobotControlPanel() {
     const [showCamerasInTabs, setShowCamerasInTabs] = useState(true);
 
     // Resizable Split Pane State
-    const [splitWidth, setSplitWidth] = useState(50); // percentage for controls panel
-
-    // Calculate scale based on split width and camera visibility
-    // When cameras are off, controls get full width -> larger scale
-    // When cameras are on, scale based on split width (more responsive)
-    const controlScale = showCamerasInTabs ? Math.max(0.6, (splitWidth / 50) * 0.9) : 1.3;
+    const [splitWidth, setSplitWidth] = useState(60); // percentage for controls panel (default 60% for controls)
 
     // Camera Selection State
     const [showCameraSelector, setShowCameraSelector] = useState(false);
     const [availableDevices, setAvailableDevices] = useState<MediaDeviceInfo[]>([]);
+
+    // Fullscreen State
+    const panelRef = useRef<HTMLDivElement>(null);
+    const [isFullscreen, setIsFullscreen] = useState(false);
+
+    const toggleFullscreen = useCallback(() => {
+        if (!panelRef.current) return;
+        if (!document.fullscreenElement) {
+            panelRef.current.requestFullscreen().catch(err => {
+                console.error('Fullscreen request failed:', err);
+            });
+        } else {
+            document.exitFullscreen();
+        }
+    }, []);
+
+    useEffect(() => {
+        const handleFullscreenChange = () => {
+            setIsFullscreen(!!document.fullscreenElement);
+        };
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    }, []);
+
+    // Measure containers for precise scaling
+    // Separate refs to avoid conflicts between tabs and ensure correct widths
+    const [gamepadRef, gamepadBounds] = useMeasure();
+    const [keyboardRef, keyboardBounds] = useMeasure();
+
+    // Calculate dynamic scales
+    const BASE_WIDTH = 540;
+    const PADDING = 48; // px
+
+    // Gamepad Scale
+    const gpScaleCalc = gamepadBounds.width ? (gamepadBounds.width - PADDING) / BASE_WIDTH : 1.0;
+    const gamepadScale = Math.min(Math.max(gpScaleCalc, 0.5), 1.8);
+
+    // Keyboard Scale (can share same base scale logic or tune independently)
+    const kbScaleCalc = keyboardBounds.width ? (keyboardBounds.width - PADDING) / 480 : 1.0;
+    const keyboardScale = Math.min(Math.max(kbScaleCalc, 0.5), 1.8);
+
+    // Legacy fallback (remove eventually)
+    // const baseScale = showCamerasInTabs ? Math.max(1.0, (splitWidth / 50) * 1.2) : 1.5;
+    // const controlScale = isFullscreen ? baseScale * 1.4 : baseScale;
 
     // --- LOGIC: Active Tab determines Active Interaction Mode ---
 
@@ -152,11 +192,16 @@ export function RobotControlPanel() {
 
     // 2. Gamepad Logic
     const onGamepadMove = useCallback((jointIdx: number, delta: number) => {
-        moveJointRel(jointIdx, delta);
-    }, [moveJointRel]);
+        // Only move if ready (safety check moved here to allow visualizer to work always)
+        if (connected && calibrationState === 'rdy' && !isPlaying) {
+            moveJointRel(jointIdx, delta);
+        }
+    }, [moveJointRel, connected, calibrationState, isPlaying]);
 
     const gamepadState = useGamepad({
-        enabled: connected && calibrationState === 'rdy' && activeTab === 'gamepad' && !isPlaying,
+        // Always enable visualizer when tab is active to detect connection
+        // Actual movement is guarded in onGamepadMove
+        enabled: activeTab === 'gamepad',
         onMove: onGamepadMove
     });
 
@@ -217,7 +262,7 @@ export function RobotControlPanel() {
     const robotCount = Object.keys(robots).length;
 
     return (
-        <div className="w-full max-w-6xl mx-auto p-4 sm:p-6 lg:p-8 bg-zinc-950/50 rounded-2xl border border-zinc-800 backdrop-blur-xl flex flex-col min-h-[800px] relative">
+        <div ref={panelRef} className={`w-full mx-auto p-4 sm:p-6 lg:p-8 bg-zinc-950/50 rounded-2xl border border-zinc-800 backdrop-blur-xl flex flex-col min-h-[800px] relative ${isFullscreen ? 'max-w-none h-screen' : 'max-w-6xl'}`}>
 
             {/* Camera Selection Modal */}
             {showCameraSelector && (
@@ -329,6 +374,16 @@ export function RobotControlPanel() {
                         <Camera className="mr-2 h-3 w-3" />
                         + Add Camera
                     </Button>
+
+                    <Button
+                        onClick={toggleFullscreen}
+                        variant="ghost"
+                        size="sm"
+                        className="h-9 w-9 p-0"
+                        title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                    >
+                        {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                    </Button>
                 </div>
             </div>
 
@@ -394,8 +449,8 @@ export function RobotControlPanel() {
                         {showCamerasInTabs ? (
                             <ResizableSplitPane
                                 defaultLeftWidth={splitWidth}
-                                minLeftWidth={35}
-                                maxLeftWidth={70}
+                                minLeftWidth={40}
+                                maxLeftWidth={75}
                                 onResize={setSplitWidth}
                                 className="flex-1"
                                 left={
@@ -521,8 +576,8 @@ export function RobotControlPanel() {
                         {showCamerasInTabs ? (
                             <ResizableSplitPane
                                 defaultLeftWidth={splitWidth}
-                                minLeftWidth={35}
-                                maxLeftWidth={70}
+                                minLeftWidth={40}
+                                maxLeftWidth={75}
                                 onResize={setSplitWidth}
                                 className="flex-1"
                                 left={
@@ -531,11 +586,13 @@ export function RobotControlPanel() {
                                             <h3 className="text-xl font-bold text-white">Keyboard Control</h3>
                                             <p className="text-zinc-500 text-sm">Use keys or click buttons below</p>
                                         </div>
-                                        <VisualKeyboard
-                                            onMoveStart={startManualMove}
-                                            onMoveStop={stopManualMove}
-                                            scale={controlScale}
-                                        />
+                                        <div ref={keyboardRef} className="w-full flex justify-center">
+                                            <VisualKeyboard
+                                                onMoveStart={startManualMove}
+                                                onMoveStop={stopManualMove}
+                                                scale={keyboardScale}
+                                            />
+                                        </div>
                                     </div>
                                 }
                                 right={
@@ -555,11 +612,13 @@ export function RobotControlPanel() {
                                     <h3 className="text-2xl font-bold text-white">Keyboard Control</h3>
                                     <p className="text-zinc-500 text-sm">Use keys or click buttons below</p>
                                 </div>
-                                <VisualKeyboard
-                                    onMoveStart={startManualMove}
-                                    onMoveStop={stopManualMove}
-                                    scale={controlScale}
-                                />
+                                <div ref={keyboardRef} className="w-full flex justify-center">
+                                    <VisualKeyboard
+                                        onMoveStart={startManualMove}
+                                        onMoveStop={stopManualMove}
+                                        scale={keyboardScale}
+                                    />
+                                </div>
                             </div>
                         )}
                     </TabsContent>
@@ -580,17 +639,17 @@ export function RobotControlPanel() {
                         {showCamerasInTabs ? (
                             <ResizableSplitPane
                                 defaultLeftWidth={splitWidth}
-                                minLeftWidth={35}
-                                maxLeftWidth={70}
+                                minLeftWidth={40}
+                                maxLeftWidth={75}
                                 onResize={setSplitWidth}
                                 className="flex-1"
                                 left={
-                                    <div className="h-full flex flex-col items-center justify-center px-6 py-4">
+                                    <div className="h-full flex flex-col items-center justify-center px-6 py-4 overflow-hidden">
                                         <div className="text-center space-y-2 mb-4">
                                             <h3 className="text-xl font-bold text-white">Gamepad Status</h3>
                                             <p className="text-zinc-500 text-sm">Visual feedback of connected controller</p>
                                         </div>
-                                        <div className="relative flex-shrink-0">
+                                        <div ref={gamepadRef} className="w-full relative flex-shrink-0 flex justify-center">
                                             {!gamepadState.connected && (
                                                 <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/80 backdrop-blur-sm rounded-2xl">
                                                     <Gamepad2 className="w-12 h-12 text-zinc-600 mb-4 animate-pulse" />
@@ -598,7 +657,7 @@ export function RobotControlPanel() {
                                                     <p className="text-zinc-500 max-w-sm mb-6 text-center">Press any button on your controller to wake it up.</p>
                                                 </div>
                                             )}
-                                            <GamepadVisualizer state={gamepadState} scale={controlScale} />
+                                            <GamepadVisualizer state={gamepadState} scale={gamepadScale} />
                                         </div>
                                     </div>
                                 }
@@ -619,7 +678,7 @@ export function RobotControlPanel() {
                                     <h3 className="text-2xl font-bold text-white">Gamepad Status</h3>
                                     <p className="text-zinc-500 text-sm">Visual feedback of connected controller</p>
                                 </div>
-                                <div className="relative">
+                                <div ref={gamepadRef} className="relative flex justify-center w-full">
                                     {!gamepadState.connected && (
                                         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/80 backdrop-blur-sm rounded-2xl">
                                             <Gamepad2 className="w-12 h-12 text-zinc-600 mb-4 animate-pulse" />
@@ -627,7 +686,7 @@ export function RobotControlPanel() {
                                             <p className="text-zinc-500 max-w-sm mb-6 text-center">Press any button on your controller to wake it up.</p>
                                         </div>
                                     )}
-                                    <GamepadVisualizer state={gamepadState} scale={controlScale} />
+                                    <GamepadVisualizer state={gamepadState} scale={gamepadScale} />
                                 </div>
                             </div>
                         )}
@@ -649,8 +708,8 @@ export function RobotControlPanel() {
                         {showCamerasInTabs ? (
                             <ResizableSplitPane
                                 defaultLeftWidth={splitWidth}
-                                minLeftWidth={35}
-                                maxLeftWidth={70}
+                                minLeftWidth={40}
+                                maxLeftWidth={75}
                                 onResize={setSplitWidth}
                                 className="flex-1"
                                 left={
@@ -728,12 +787,14 @@ export function RobotControlPanel() {
                                         <h4 className="text-sm font-medium text-zinc-400 mb-2">Connected Cameras</h4>
                                         <div className="space-y-2">
                                             {cameras.map(cam => (
-                                                <div key={cam.id} className="flex items-center justify-between text-sm bg-black/40 p-2 rounded">
-                                                    <span className="text-zinc-300 truncate max-w-[150px]">{cam.label}</span>
-                                                    <Button onClick={() => removeCamera(cam.id)} size="sm" variant="ghost" className="h-6 w-6 p-0 text-red-500 hover:text-red-400 hover:bg-red-500/10">
-                                                        <Unlink className="w-3 h-3" />
-                                                    </Button>
-                                                </div>
+                                                <Button
+                                                    key={cam.id}
+                                                    onClick={() => removeCamera(cam.id)}
+                                                    variant="destructive"
+                                                    className="w-full justify-start mb-2"
+                                                >
+                                                    <Unlink className="mr-2 h-4 w-4" /> Disconnect {cam.label || 'Camera'}
+                                                </Button>
                                             ))}
                                         </div>
                                     </div>
@@ -749,10 +810,10 @@ export function RobotControlPanel() {
                         </div>
                     </TabsContent>
                 </div>
-            </Tabs>
+            </Tabs >
 
             {/* Persistent Recording Footer */}
-            <div className="mt-4 p-4 bg-zinc-900/80 border border-zinc-800 rounded-xl flex items-center justify-between">
+            < div className="mt-4 p-4 bg-zinc-900/80 border border-zinc-800 rounded-xl flex items-center justify-between" >
                 <div className="flex items-center gap-4">
                     <div className={`p-2 rounded-full ${isRecording ? 'bg-red-500/20 text-red-500 animate-pulse' : 'bg-zinc-800 text-zinc-600'}`}>
                         <Disc className="w-5 h-5" />
@@ -785,8 +846,8 @@ export function RobotControlPanel() {
                         PLAY
                     </Button>
                 </div>
-            </div>
-        </div>
+            </div >
+        </div >
     );
 }
 
