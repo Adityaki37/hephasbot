@@ -128,7 +128,7 @@
   body {
     @apply bg-background text-foreground;
     background-image: var(--noise-url);
-    background-attachment: fixed;
+    /* background-attachment: fixed; - Causes severe lag on mobile */
     background-blend-mode: overlay;
   }
 }

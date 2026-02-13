@@ -12,10 +12,10 @@ export default function Home() {
     <div className="min-h-screen bg-background text-foreground overflow-hidden selection:bg-primary/30">
 
       {/* Background Elements */}
-      <div className="fixed inset-0 z-0 pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/10 rounded-full blur-[120px]" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-500/10 rounded-full blur-[120px]" />
-        <div className="absolute top-[20%] left-[50%] -translate-x-1/2 w-[30%] h-[30%] bg-primary/5 rounded-full blur-[100px]" />
+      <div className="fixed inset-0 z-0 pointer-events-none hidden md:block">
+        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-primary/10 rounded-full blur-[120px] hidden md:block" />
+        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-blue-500/10 rounded-full blur-[120px] hidden md:block" />
+        <div className="absolute top-[20%] left-[50%] -translate-x-1/2 w-[30%] h-[30%] bg-primary/5 rounded-full blur-[100px] hidden md:block" />
       </div>
 
       {/* Navigation */}
