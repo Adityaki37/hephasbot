@@ -254,12 +254,6 @@ export class RobotDriver {
             const res = await this.readPacket(id, 8);
 
             if (res && res.length >= 8) {
-                // Error byte at idx 4. Params at 5, 6.
-                const serverErr = res[4];
-                if (serverErr !== 0) {
-                    // console.warn(`Motor ${id} error: ${serverErr}`);
-                }
-
                 const low = res[5];
                 const high = res[6];
                 return (high << 8) | low;
@@ -268,6 +262,7 @@ export class RobotDriver {
             return -1;
         });
     }
+
 
     async setPosition(id: number, position: number, speed: number = 0, time: number = 0) {
         await this.runExclusive(async () => {
@@ -471,11 +466,10 @@ export class RobotDriver {
             } catch (e) {
                 // Ignore
             }
-            // Small delay to clear bus
-            await new Promise(r => setTimeout(r, 10));
         }
         return found;
     }
+
 
     // Reset all servos (1-6) to full range
     async resetAllServoLimits(): Promise<{ id: number; success: boolean }[]> {

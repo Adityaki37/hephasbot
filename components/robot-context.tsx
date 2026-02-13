@@ -61,7 +61,19 @@ interface RobotContextType {
     // Motor Config Wizard
     scanMotors: (botId: string) => Promise<number[]>;
     configureMotorId: (botId: string, currentId: number, newId: number) => Promise<boolean>;
+    // Isolation
     setMotorIsolation: (botId: string, targetId: number | null, allIds: number[]) => Promise<void>;
+
+    // Leader-Follower
+    leaderRobotId: string | null;
+    setLeaderRobotId: (id: string | null) => void;
+    followerRobotId: string | null;
+    setFollowerRobotId: (id: string | null) => void;
+    isLeaderFollowerActive: boolean;
+    toggleLeaderFollower: () => Promise<void>;
+
+    // Naming
+    updateRobotName: (id: string, newName: string) => void;
 
     // Recording (Global for now, uses Active Robot or All?)
     // Let's make recording capture ALL robots if sync is on? 
@@ -95,6 +107,11 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     // Speed Control
     const [speedMultiplier, setSpeedMultiplier] = useState(1.0);
 
+    // Leader-Follower State
+    const [leaderRobotId, setLeaderRobotId] = useState<string | null>(null);
+    const [followerRobotId, setFollowerRobotId] = useState<string | null>(null);
+    const [isLeaderFollowerActive, setIsLeaderFollowerActive] = useState(false);
+
     // Helpers
     const activeRobot = activeRobotId ? robots[activeRobotId] : null;
 
@@ -104,10 +121,10 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 10));
 
     // REF TO LATEST STATE (Fixes stale closures in setInterval/Timeouts)
-    const stateRef = useRef({ robots, activeRobotId, syncControl, speedMultiplier });
+    const stateRef = useRef({ robots, activeRobotId, syncControl, speedMultiplier, isLeaderFollowerActive, leaderRobotId, followerRobotId, isRecording });
     useEffect(() => {
-        stateRef.current = { robots, activeRobotId, syncControl, speedMultiplier };
-    }, [robots, activeRobotId, syncControl, speedMultiplier]);
+        stateRef.current = { robots, activeRobotId, syncControl, speedMultiplier, isLeaderFollowerActive, leaderRobotId, followerRobotId, isRecording };
+    }, [robots, activeRobotId, syncControl, speedMultiplier, isLeaderFollowerActive, leaderRobotId, followerRobotId, isRecording]);
 
     // ----------- POLLING LOOP (FLEET WIDE) -----------
     useEffect(() => {
@@ -116,6 +133,9 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
         const runLoop = async () => {
             if (!active) return;
+
+            // Reading from stateRef ensures we always have latest state without restarting loop
+            const { robots, activeRobotId, isRecording, isLeaderFollowerActive, leaderRobotId, followerRobotId } = stateRef.current;
 
             const robotIds = Object.keys(robots);
             if (robotIds.length === 0) {
@@ -135,7 +155,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
                 if (!bot.connected || !bot.driver) continue;
 
                 // Conditions to read
-                const shouldRead = bot.calibrationState === 'cal' || bot.freeMode || (id === activeRobotId && isRecording);
+                const shouldRead = bot.calibrationState === 'cal' || bot.freeMode || (id === activeRobotId && isRecording) || (isLeaderFollowerActive && id === leaderRobotId);
 
                 if (!shouldRead) continue;
 
@@ -175,7 +195,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
                 }
 
                 // 2. SYNC JOINTS
-                if (bot.calibrationState === 'cal' || bot.freeMode) {
+                if (bot.calibrationState === 'cal' || bot.freeMode || (isLeaderFollowerActive && id === leaderRobotId)) {
                     const newVals = readings.map((val, i) => {
                         if (val === -1) return bot.jointVals[i];
 
@@ -205,6 +225,34 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
                 }
             }
 
+            // --- LEADER FOLLOWER SYNC ---
+            if (active && isLeaderFollowerActive && leaderRobotId && followerRobotId && leaderRobotId !== followerRobotId) {
+                const leaderUpdate = updates[leaderRobotId];
+                if (leaderUpdate && leaderUpdate.jointVals) {
+                    // Write to Follower
+                    // Check if follower exists in updates (or current state)
+                    // We must use `robots` for limits, but `updates` might have new values? Limits change rarely.
+                    const follower = robots[followerRobotId];
+
+                    if (follower && follower.connected) {
+                        const leaderVals = leaderUpdate.jointVals; // This is % (-100 to 100)
+
+                        // Write to Follower using its limits
+                        for (let i = 0; i < 6; i++) {
+                            const val = leaderVals[i];
+                            const limit = follower.calibrationLimits[i];
+                            const range = limit.max - limit.min;
+                            const norm = (val + 100) / 200;
+                            let target = Math.floor(limit.min + (norm * range));
+                            target = Math.max(0, Math.min(4095, Math.max(limit.min, Math.min(limit.max, target))));
+
+                            // Async fire and forget? 
+                            follower.driver.setPosition(i + 1, target).catch(() => { });
+                        }
+                    }
+                }
+            }
+
             // Apply updates
             if (updatesFound) {
                 setRobots(prev => {
@@ -221,7 +269,7 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
         runLoop();
         return () => { active = false; };
-    }, [robots, activeRobotId, isRecording]); // Re-binds when robot list changes. Optimize? 
+    }, []); // Stable loop 
     // If robots changes, we restart loop. That's fine.
 
     // ----------- ACTIONS -----------
@@ -605,6 +653,49 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         }
     };
 
+    const updateRobotName = (id: string, newName: string) => {
+        setRobots(prev => ({
+            ...prev,
+            [id]: { ...prev[id], name: newName }
+        }));
+    };
+
+
+
+    const toggleLeaderFollower = async () => {
+        if (!followerRobotId || !leaderRobotId) {
+            addLog("Cannot start Leader-Follower: Missing Leader or Follower.");
+            return;
+        }
+
+        const isActive = !isLeaderFollowerActive;
+        setIsLeaderFollowerActive(isActive);
+
+        const leader = robots[leaderRobotId];
+        const follower = robots[followerRobotId];
+
+        if (isActive) {
+            addLog(`[Leader-Follower] STARTED. Leader: ${leader.name}, Follower: ${follower.name}`);
+            // SAFETY: Leader -> Free (Torque OFF), Follower -> Rigid (Torque ON)
+            await setAllTorque(leader, false);
+            await setAllTorque(follower, true);
+            // Update local state to reflect this
+            setRobots(prev => ({
+                ...prev,
+                [leader.id]: { ...prev[leader.id], freeMode: true },
+                [follower.id]: { ...prev[follower.id], freeMode: false }
+            }));
+        } else {
+            addLog(`[Leader-Follower] STOPPED.`);
+            // SAFETY: Lock Leader? Or leave free? Let's Lock Leader to prevent slumping.
+            await setAllTorque(leader, true);
+            setRobots(prev => ({
+                ...prev,
+                [leader.id]: { ...prev[leader.id], freeMode: false }
+            }));
+        }
+    };
+
     return (
         <RobotContext.Provider value={{
             robots,
@@ -639,6 +730,15 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
             scanMotors,
             configureMotorId,
             setMotorIsolation,
+
+            // Leader-Follower
+            leaderRobotId,
+            setLeaderRobotId,
+            followerRobotId,
+            setFollowerRobotId,
+            isLeaderFollowerActive,
+            toggleLeaderFollower,
+            updateRobotName,
 
             item: "so-100",
             get activeRobot() { return activeRobotId ? robots[activeRobotId] : null }

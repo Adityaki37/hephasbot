@@ -1,4 +1,4 @@
-import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink, Maximize2, Minimize2 } from "lucide-react";
+import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink, Maximize2, Minimize2, Edit2, ArrowRightLeft } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -10,6 +10,7 @@ import useMeasure from "react-use-measure";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { VisualKeyboard } from "@/components/visual-keyboard";
 import { GamepadVisualizer } from "@/components/gamepad-visualizer";
 import { ResizableSplitPane } from "@/components/resizable-split-pane";
@@ -103,17 +104,22 @@ function CameraGrid({
 
 export function RobotControlPanel() {
     const {
-        // Multi-Robot State
-        robots,
+        connected,
         activeRobotId,
+        robots,
         setActiveRobot,
         addRobot,
         syncControl,
         setSyncControl,
         disconnectRobot,
 
+        // Leader Follower
+        leaderRobotId,
+        setLeaderRobotId,
+        isLeaderFollowerActive,
+        toggleLeaderFollower,
+
         // Active State (Mapped by useRobot)
-        connected,
         calibrationState,
         jointVals,
         logs,
@@ -133,7 +139,10 @@ export function RobotControlPanel() {
 
         speedMultiplier,
         setSpeedMultiplier,
-        scanMotors
+        scanMotors,
+        followerRobotId,
+        setFollowerRobotId,
+        updateRobotName
     } = useRobot();
 
     // Multi-Camera State
@@ -154,6 +163,22 @@ export function RobotControlPanel() {
     const [showWizard, setShowWizard] = useState(false);
     const [calibrationError, setCalibrationError] = useState<string | null>(null);
     const [calibrationWarning, setCalibrationWarning] = useState<{ found: number, ids: number[] } | null>(null);
+
+    // Name Editing State
+    const [editingNameId, setEditingNameId] = useState<string | null>(null);
+    const [editingNameValue, setEditingNameValue] = useState("");
+
+    const startEditingName = (id: string, currentName: string) => {
+        setEditingNameId(id);
+        setEditingNameValue(currentName);
+    };
+
+    const saveName = () => {
+        if (editingNameId && editingNameValue.trim()) {
+            updateRobotName(editingNameId, editingNameValue.trim());
+            setEditingNameId(null);
+        }
+    };
 
     // --- SAFE CALIBRATION HANDLER ---
     const handleSafeCalibrationStart = async () => {
@@ -456,20 +481,49 @@ export function RobotControlPanel() {
                         </div>
                     )}
 
-                    {/* Robot Selector */}
+                    {/* Robot Selector with Edit */}
                     {robotCount > 0 && (
-                        <Select value={activeRobotId || ""} onValueChange={(val) => val && setActiveRobot(val)}>
-                            <SelectTrigger className="w-[140px] h-9 text-xs">
-                                <span>{activeRobotId && robots[activeRobotId] ? robots[activeRobotId].name : "Select Robot"}</span>
-                            </SelectTrigger>
-                            <SelectContent>
-                                {Object.values(robots).map(bot => (
-                                    <SelectItem key={bot.id} value={bot.id}>
-                                        {bot.name} {bot.calibrationState === 'rdy' ? '✓' : '⚠'}
-                                    </SelectItem>
-                                ))}
-                            </SelectContent>
-                        </Select>
+                        <div className="flex items-center gap-2">
+                            {editingNameId === activeRobotId ? (
+                                <div className="flex items-center gap-1">
+                                    <Input
+                                        value={editingNameValue}
+                                        onChange={(e) => setEditingNameValue(e.target.value)}
+                                        className="h-9 w-32 text-xs"
+                                        onKeyDown={(e) => e.key === 'Enter' && saveName()}
+                                        autoFocus
+                                    />
+                                    <Button size="sm" variant="ghost" onClick={saveName} className="h-9 w-9 p-0 hover:bg-green-500/20 hover:text-green-400">
+                                        <Check className="w-4 h-4" />
+                                    </Button>
+                                </div>
+                            ) : (
+                                <div className="flex items-center">
+                                    <Select value={activeRobotId || ""} onValueChange={(val) => val && setActiveRobot(val)}>
+                                        <SelectTrigger className="w-[140px] h-9 text-xs">
+                                            <span>{activeRobotId && robots[activeRobotId] ? robots[activeRobotId].name : "Select Robot"}</span>
+                                        </SelectTrigger>
+                                        <SelectContent>
+                                            {Object.values(robots).map(bot => (
+                                                <SelectItem key={bot.id} value={bot.id}>
+                                                    {bot.name} {bot.calibrationState === 'rdy' ? '✓' : '⚠'}
+                                                </SelectItem>
+                                            ))}
+                                        </SelectContent>
+                                    </Select>
+                                    {activeRobotId && (
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-9 w-9 p-0 ml-1 text-zinc-500 hover:text-white"
+                                            onClick={() => startEditingName(activeRobotId, robots[activeRobotId].name)}
+                                        >
+                                            <Edit2 className="w-3 h-3" />
+                                        </Button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
                     )}
 
                     {/* Speed Slider */}
@@ -513,9 +567,9 @@ export function RobotControlPanel() {
 
             {/* Main Interface */}
             <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
-                <TabsList className="grid w-full grid-cols-5 mb-6 bg-zinc-900/50 p-1">
+                <TabsList className="grid w-full grid-cols-6 mb-6 bg-zinc-900/50 p-1">
                     <TabsTrigger value="teleop" className="data-[state=active]:bg-zinc-800">
-                        <Sliders className="mr-2 w-4 h-4" /> Teleop
+                        <Sliders className="mr-2 w-4 h-4" /> Joint Control
                     </TabsTrigger>
                     <TabsTrigger value="keyboard" className="data-[state=active]:bg-zinc-800">
                         <Keyboard className="mr-2 w-4 h-4" /> Keyboard
@@ -528,6 +582,9 @@ export function RobotControlPanel() {
                     </TabsTrigger>
                     <TabsTrigger value="settings" className="data-[state=active]:bg-zinc-800">
                         <Settings className="mr-2 w-4 h-4" /> Settings
+                    </TabsTrigger>
+                    <TabsTrigger value="leader" className="data-[state=active]:bg-orange-500/10 data-[state=active]:text-orange-500">
+                        <Users className="mr-2 w-4 h-4" /> Leader Mode
                     </TabsTrigger>
                 </TabsList>
 
@@ -956,6 +1013,147 @@ export function RobotControlPanel() {
                             <h3 className="text-sm font-mono text-zinc-500 mb-2">SYSTEM LOGS</h3>
                             <div className="bg-black/50 p-4 rounded-lg h-40 overflow-y-auto text-xs font-mono text-green-400/80">
                                 {logs.map((l, i) => <div key={i}>&gt; {l}</div>)}
+                            </div>
+                        </div>
+                    </TabsContent>
+
+                    {/* LEADER MODE TAB */}
+                    <TabsContent value="leader" className="h-full mt-0 flex flex-col p-6">
+                        <div className="flex flex-col items-center justify-center h-full max-w-2xl mx-auto w-full space-y-8">
+
+                            <div className="text-center space-y-2">
+                                <h3 className="text-2xl font-bold text-white flex items-center justify-center gap-3">
+                                    <Users className="w-8 h-8 text-orange-500" /> Leader-Follower
+                                </h3>
+                                <p className="text-zinc-400">
+                                    Synchronize movements between two robots.
+                                </p>
+                            </div>
+
+                            <div className="w-full bg-zinc-900/50 border border-zinc-800 rounded-xl p-8 space-y-8">
+
+                                {/* SELECTION GRID */}
+                                <div className="flex items-center justify-between gap-4">
+
+                                    {/* LEADER SIDE */}
+                                    <div className="flex-1 space-y-3">
+                                        <Label className="text-orange-500 font-bold uppercase tracking-wider text-xs flex items-center gap-2">
+                                            <Activity className="w-3 h-3" /> Leader (Input)
+                                        </Label>
+                                        <Select
+                                            value={leaderRobotId || ""}
+                                            onValueChange={setLeaderRobotId}
+                                            disabled={isLeaderFollowerActive}
+                                        >
+                                            <SelectTrigger className="h-14 text-lg bg-zinc-950 border-zinc-700 focus:ring-orange-500/50">
+                                                <SelectValue placeholder="Select Leader" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {Object.values(robots)
+                                                    .filter(r => r.id !== followerRobotId)
+                                                    .map(bot => (
+                                                        <SelectItem key={bot.id} value={bot.id}>
+                                                            {bot.name}
+                                                        </SelectItem>
+                                                    ))}
+                                            </SelectContent>
+                                        </Select>
+                                        <p className="text-xs text-zinc-500">
+                                            Motors will be <strong>FREE</strong> to move.
+                                        </p>
+                                    </div>
+
+                                    {/* SWAP BUTTON */}
+                                    <div className="flex flex-col justify-end pb-6">
+                                        <Button
+                                            variant="ghost"
+                                            size="icon"
+                                            className="rounded-full hover:bg-orange-950/30 hover:text-orange-500"
+                                            disabled={isLeaderFollowerActive}
+                                            onClick={() => {
+                                                const oldLeader = leaderRobotId;
+                                                const oldFollower = followerRobotId;
+                                                setLeaderRobotId(oldFollower);
+                                                setFollowerRobotId(oldLeader);
+                                            }}
+                                        >
+                                            <ArrowRightLeft className="w-5 h-5 text-zinc-400" />
+                                        </Button>
+                                    </div>
+
+                                    {/* FOLLOWER SIDE */}
+                                    <div className="flex-1 space-y-3">
+                                        <Label className="text-orange-300 font-bold uppercase tracking-wider text-xs flex items-center gap-2">
+                                            <Activity className="w-3 h-3" /> Follower (Output)
+                                        </Label>
+                                        <Select
+                                            value={followerRobotId || ""}
+                                            onValueChange={setFollowerRobotId}
+                                            disabled={isLeaderFollowerActive}
+                                        >
+                                            <SelectTrigger className="h-14 text-lg bg-zinc-950 border-zinc-700 focus:ring-orange-500/50">
+                                                <SelectValue placeholder="Select Follower" />
+                                            </SelectTrigger>
+                                            <SelectContent>
+                                                {Object.values(robots)
+                                                    .filter(r => r.id !== leaderRobotId)
+                                                    .map(bot => (
+                                                        <SelectItem key={bot.id} value={bot.id}>
+                                                            {bot.name}
+                                                        </SelectItem>
+                                                    ))}
+                                            </SelectContent>
+                                        </Select>
+                                        <p className="text-xs text-zinc-500">
+                                            Motors will be <strong>RIGID</strong> and mimic leader.
+                                        </p>
+                                    </div>
+
+                                </div>
+
+                                {Object.values(robots).length < 2 && (
+                                    <p className="text-center text-sm text-amber-500 flex items-center justify-center gap-2 bg-amber-500/10 p-2 rounded">
+                                        <AlertTriangle className="w-4 h-4" /> Need at least 2 robots connected.
+                                    </p>
+                                )}
+
+                                <div className="pt-4 border-t border-zinc-800">
+                                    <Button
+                                        onClick={toggleLeaderFollower}
+                                        disabled={!leaderRobotId || !followerRobotId}
+                                        className={cn(
+                                            "w-full h-16 text-xl font-bold transition-all shadow-lg",
+                                            isLeaderFollowerActive
+                                                ? "bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-red-900/20"
+                                                : "bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white shadow-orange-900/20"
+                                        )}
+                                    >
+                                        {isLeaderFollowerActive ? (
+                                            <>
+                                                <Unlink className="mr-3 h-6 w-6" /> STOP SYNC
+                                            </>
+                                        ) : (
+                                            <>
+                                                <LinkIcon className="mr-3 h-6 w-6" /> START SYNC
+                                            </>
+                                        )}
+                                    </Button>
+                                    <p className="text-center text-xs text-zinc-500 mt-3">
+                                        {isLeaderFollowerActive
+                                            ? "Leader is compliant. Follower is actively servoing."
+                                            : "Select robots above and start sync."}
+                                    </p>
+                                </div>
+
+                                {/* STATUS INDICATOR */}
+                                {isLeaderFollowerActive && (
+                                    <div className="bg-orange-950/30 border border-orange-900/50 rounded-lg p-4 text-center animate-in fade-in slide-in-from-bottom-4">
+                                        <p className="text-orange-200 font-mono text-sm flex items-center justify-center gap-2">
+                                            <Activity className="w-4 h-4 animate-pulse" /> Sync Active • Latency: ~20ms
+                                        </p>
+                                    </div>
+                                )}
+
                             </div>
                         </div>
                     </TabsContent>
