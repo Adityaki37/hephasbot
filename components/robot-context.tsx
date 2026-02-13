@@ -58,6 +58,11 @@ interface RobotContextType {
     finishCalibration: () => void;
     setFreeMode: (enabled: boolean) => Promise<void>;
 
+    // Motor Config Wizard
+    scanMotors: (botId: string) => Promise<number[]>;
+    configureMotorId: (botId: string, currentId: number, newId: number) => Promise<boolean>;
+    setMotorIsolation: (botId: string, targetId: number | null, allIds: number[]) => Promise<void>;
+
     // Recording (Global for now, uses Active Robot or All?)
     // Let's make recording capture ALL robots if sync is on? 
     // For simplicity, recording is currently designed for one trajectory. 
@@ -548,6 +553,58 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         addLog("Playback finished.");
     };
 
+    // --- MOTOR CONFIGURATION ---
+    const scanMotors = async (botId: string): Promise<number[]> => {
+        const bot = robots[botId];
+        if (!bot) return [];
+        // Scan standard range + temp range
+        // Standard: 1-6
+        // Temp: 11-20 (or whatever we use)
+        // Default new: 1
+        const standard = await bot.driver.scan(1, 6);
+        const temp = await bot.driver.scan(11, 20);
+        const defaults = await bot.driver.scan(0, 1); // check 0 and 1
+        return Array.from(new Set([...standard, ...temp, ...defaults])).sort((a, b) => a - b);
+    };
+
+    const configureMotorId = async (botId: string, currentId: number, newId: number): Promise<boolean> => {
+        const bot = robots[botId];
+        if (!bot) return false;
+        return await bot.driver.changeId(currentId, newId);
+    };
+
+    // --- ISOLATION MODE ---
+    // Replaces "Wiggle". Locks all other motors, frees the target one.
+    // If targetId is null, frees ALL motors (Stop Isolation).
+    const setMotorIsolation = async (botId: string, targetId: number | null, allIds: number[]) => {
+        const bot = robots[botId];
+        if (!bot) return;
+
+        if (targetId !== null) {
+            addLog(`[${bot.name}] ISOLATION MODE: Motor ${targetId} FREE, others LOCKED.`);
+        } else {
+            addLog(`[${bot.name}] ISOLATION MODE: OFF (All Motors Free).`);
+        }
+
+        // We iterate through all known IDs on the bus
+        for (const id of allIds) {
+            // small delay to prevent bus congestion
+            await new Promise(r => setTimeout(r, 10));
+
+            if (targetId === null) {
+                // STOP: Free everyone
+                try { await bot.driver.setTorque(id, false); } catch (e) { }
+            } else {
+                // ACTIVE: Free target, Lock others
+                if (id === targetId) {
+                    try { await bot.driver.setTorque(id, false); } catch (e) { }
+                } else {
+                    try { await bot.driver.setTorque(id, true); } catch (e) { }
+                }
+            }
+        }
+    };
+
     return (
         <RobotContext.Provider value={{
             robots,
@@ -577,6 +634,11 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
             speedMultiplier,
             setSpeedMultiplier,
+
+            // Config
+            scanMotors,
+            configureMotorId,
+            setMotorIsolation,
 
             item: "so-100",
             get activeRobot() { return activeRobotId ? robots[activeRobotId] : null }

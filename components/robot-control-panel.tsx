@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRobot } from "@/components/robot-context";
+import { cn } from "@/lib/utils";
 import { useGamepad } from "@/hooks/use-gamepad";
 import useMeasure from "react-use-measure";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -12,6 +13,18 @@ import { Label } from "@/components/ui/label";
 import { VisualKeyboard } from "@/components/visual-keyboard";
 import { GamepadVisualizer } from "@/components/gamepad-visualizer";
 import { ResizableSplitPane } from "@/components/resizable-split-pane";
+import { MotorConfigWizard } from "@/components/motor-config-wizard";
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
 
 // function RobotControlPanel continued...
 
@@ -119,7 +132,8 @@ export function RobotControlPanel() {
         playRecording,
 
         speedMultiplier,
-        setSpeedMultiplier
+        setSpeedMultiplier,
+        scanMotors
     } = useRobot();
 
     // Multi-Camera State
@@ -137,6 +151,42 @@ export function RobotControlPanel() {
     // Fullscreen State
     const panelRef = useRef<HTMLDivElement>(null);
     const [isFullscreen, setIsFullscreen] = useState(false);
+    const [showWizard, setShowWizard] = useState(false);
+    const [calibrationError, setCalibrationError] = useState<string | null>(null);
+    const [calibrationWarning, setCalibrationWarning] = useState<{ found: number, ids: number[] } | null>(null);
+
+    // --- SAFE CALIBRATION HANDLER ---
+    const handleSafeCalibrationStart = async () => {
+        if (!activeRobotId) {
+            return;
+        }
+
+        try {
+            // 1. Scan bus
+            const ids = await scanMotors(activeRobotId);
+
+            // Filter valid IDs
+            const validIds = ids.filter(id => id >= 1 && id <= 6);
+
+            // 2. Case: No Connection
+            if (ids.length === 0) {
+                setCalibrationError("Connection Error: No motors found.\n\nPlease check:\n1. Power supply is ON\n2. USB connection is secure\n3. Emergency stop is released");
+                return;
+            }
+
+            // 3. Case: Incomplete Configuration
+            if (validIds.length < 6) {
+                setCalibrationWarning({ found: validIds.length, ids });
+                return;
+            }
+
+            // 4. Good to Go
+            startCalibration();
+        } catch (error) {
+            console.error("[CalibrationCheck] Error during check:", error);
+            setCalibrationError("Failed to scan motors before calibration.\nCheck console for details.");
+        }
+    };
 
     const toggleFullscreen = useCallback(() => {
         if (!panelRef.current) return;
@@ -262,7 +312,81 @@ export function RobotControlPanel() {
     const robotCount = Object.keys(robots).length;
 
     return (
-        <div ref={panelRef} className={`w-full mx-auto p-4 sm:p-6 lg:p-8 bg-zinc-950/50 rounded-2xl border border-zinc-800 backdrop-blur-xl flex flex-col min-h-[800px] relative ${isFullscreen ? 'max-w-none h-screen' : 'max-w-6xl'}`}>
+        <div ref={panelRef} className={`w-full mx-auto p-4 sm:p-6 lg:p-8 bg-zinc-950/50 rounded-2xl border border-zinc-800 backdrop-blur-xl flex flex-col relative ${isFullscreen ? 'max-w-none h-screen' : 'max-w-6xl min-h-[600px]'}`}>
+
+            {/* MOTOR WIZARD OVERLAY */}
+            {showWizard && (
+                <div className="absolute inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-md p-4 animate-in fade-in duration-200">
+                    <MotorConfigWizard onClose={() => setShowWizard(false)} />
+                </div>
+            )}
+
+            {/* ERROR DIALOG */}
+            <AlertDialog open={!!calibrationError} onOpenChange={(open) => !open && setCalibrationError(null)}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle className="text-red-500 flex items-center gap-2">
+                            <AlertTriangle className="h-5 w-5" /> Calibration Check Failed
+                        </AlertDialogTitle>
+                        <AlertDialogDescription className="whitespace-pre-line text-zinc-600 dark:text-zinc-300">
+                            {calibrationError}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogAction onClick={() => setCalibrationError(null)}>OK</AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
+
+            {/* CONFIRMATION DIALOG */}
+            <AlertDialog open={!!calibrationWarning} onOpenChange={(open) => !open && setCalibrationWarning(null)}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>Configuration Incomplete</AlertDialogTitle>
+                        <AlertDialogDescription asChild>
+                            <div className="flex flex-col gap-4 pt-2">
+                                <p className="text-zinc-600 dark:text-zinc-400">
+                                    The robot configuration does not match the expected setup.
+                                </p>
+
+                                <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 dark:border-zinc-800 dark:bg-zinc-900/50">
+                                    <div className="flex justify-between items-center mb-2">
+                                        <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">Motors Found</span>
+                                        <span className={cn(
+                                            "text-sm font-bold",
+                                            (calibrationWarning?.found || 0) < 6 ? "text-amber-500" : "text-green-500"
+                                        )}>
+                                            {calibrationWarning?.found} / 6
+                                        </span>
+                                    </div>
+
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {calibrationWarning?.ids.length === 0 ? (
+                                            <span className="text-xs text-zinc-500 italic">No IDs detected</span>
+                                        ) : (
+                                            calibrationWarning?.ids.map(id => (
+                                                <Badge key={id} variant="secondary" className="font-mono text-xs">
+                                                    ID {id}
+                                                </Badge>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
+
+                                <p className="text-zinc-600 dark:text-zinc-400">
+                                    Do you want to open the Motor Configuration Wizard to identify and fix the missing motors?
+                                </p>
+                            </div>
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel onClick={() => setCalibrationWarning(null)}>Cancel</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => { setCalibrationWarning(null); setShowWizard(true); }}>
+                            Open Wizard
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
 
             {/* Camera Selection Modal */}
             {showCameraSelector && (
@@ -426,9 +550,23 @@ export function RobotControlPanel() {
                             <AlertTriangle className="w-12 h-12 text-yellow-500 mb-4 animate-bounce" />
                             <h3 className="text-xl font-bold text-white mb-2">Calibration Required</h3>
                             <p className="text-zinc-400 max-w-sm mb-6">Start calibration to manually move the robot and define limits.</p>
-                            <Button onClick={startCalibration} className="bg-yellow-500 hover:bg-yellow-600 text-black font-semibold">
-                                Start Calibration Display
-                            </Button>
+
+                            <div className="flex flex-col gap-3 w-full max-w-xs">
+                                <Button
+                                    onClick={handleSafeCalibrationStart}
+                                    className="bg-yellow-500 hover:bg-yellow-600 text-black font-semibold w-full"
+                                >
+                                    Start Calibration Display
+                                </Button>
+
+                                <Button
+                                    onClick={() => setShowWizard(true)}
+                                    variant="outline"
+                                    className="w-full border-zinc-700 hover:bg-zinc-800 text-zinc-300"
+                                >
+                                    <Settings className="mr-2 h-4 w-4" /> Configure Motors
+                                </Button>
+                            </div>
                         </div>
                     )}
 
@@ -769,11 +907,23 @@ export function RobotControlPanel() {
                                         Calibrating: <span className="text-white font-mono">{activeRobotId ? robots[activeRobotId]?.name : 'None'}</span>
                                     </p>
                                     <div className="flex gap-3">
-                                        <Button onClick={startCalibration} variant="outline" disabled={!connected || calibrationState === 'cal'}>Start</Button>
+                                        <Button onClick={handleSafeCalibrationStart} variant="outline" disabled={!connected || calibrationState === 'cal'}>Start</Button>
                                         <Button onClick={finishCalibration} disabled={calibrationState !== 'cal'} className="bg-blue-600 hover:bg-blue-700">Finish</Button>
                                     </div>
                                 </div>
                             </div>
+
+                            {/* MOTOR CONFIG WIZARD */}
+                            <div className="p-6 bg-zinc-900/30 rounded-xl border border-zinc-800">
+                                <h3 className="text-lg font-medium mb-4 text-white flex items-center gap-2"><Cpu className="w-5 h-5" /> Motor Setup</h3>
+                                <p className="text-sm text-zinc-500 mb-4">
+                                    Configure motor IDs and assign joints for a new robot build.
+                                </p>
+                                <Button onClick={() => setShowWizard(true)} variant="secondary" className="w-full">
+                                    <Settings className="mr-2 h-4 w-4" /> Open Configuration Wizard
+                                </Button>
+                            </div>
+
                             <div className="p-6 bg-zinc-900/30 rounded-xl border border-zinc-800">
                                 <h3 className="text-lg font-medium mb-4 text-white flex items-center gap-2"><Cpu className="w-5 h-5" /> Diagnostics</h3>
                                 {activeRobotId && (

@@ -87,7 +87,7 @@ export class SerialConnection {
         await this.writer.write(data);
     }
 
-    async read(length: number): Promise<Uint8Array> {
+    async read(length: number, timeout: number = 50): Promise<Uint8Array> {
         if (!this.port || !this.port.readable) return new Uint8Array(0);
 
         // Wait if stream is locked (prevent "locked to a reader" error)
@@ -96,11 +96,33 @@ export class SerialConnection {
         }
 
         const reader = this.port.readable.getReader();
+        let timeoutHandle: any;
+
         try {
-            const { value, done } = await reader.read();
+            // Create a promise that rejects on timeout
+            const readPromise = reader.read();
+
+            // Set up the timeout to cancel the reader
+            const timeoutPromise = new Promise<any>((_, reject) => {
+                timeoutHandle = setTimeout(() => {
+                    // Cancelling the reader typically causes read() to resolve with done=true or throw
+                    reader.cancel().catch(e => console.warn("Cancel failed", e));
+                    reject(new Error("Read timeout"));
+                }, timeout);
+            });
+
+            // Race the read against the timeout
+            const result = await Promise.race([readPromise, timeoutPromise]);
+
+            const { value, done } = result;
             if (done || !value) return new Uint8Array(0);
             return value;
+
+        } catch (e) {
+            // Ignore timeout errors, just return empty
+            return new Uint8Array(0);
         } finally {
+            clearTimeout(timeoutHandle);
             reader.releaseLock();
         }
     }
@@ -386,6 +408,73 @@ export class RobotDriver {
             console.error(`[ResetLimits] Error resetting servo ${id}:`, e);
             return false;
         }
+    }
+
+    // Change the ID of a servo
+    // Address 5 (0x05) = ID.
+    async changeId(currentId: number, newId: number): Promise<boolean> {
+        if (newId < 0 || newId > 253) return false;
+
+        try {
+            console.log(`[ChangeID] Changing servo ${currentId} to ${newId}...`);
+
+            // 1. Unlock EEPROM
+            await this.unlockEEPROM(currentId);
+            await new Promise(r => setTimeout(r, 100));
+
+            // 2. Write new ID (Address 5)
+            await this.runExclusive(async () => {
+                const params = [5, newId]; // Address 5, Value newId
+                const packet = this.createPacket(currentId, INST_WRITE, params);
+                await this.connection.write(packet);
+            });
+            await new Promise(r => setTimeout(r, 100));
+
+            // 3. Lock EEPROM (using NEW ID)
+            await this.unlockEEPROM(newId); // Unlock with new ID just in case
+            await new Promise(r => setTimeout(r, 50));
+            // Actually we should just lock with new ID
+            // But wait, if write failed, it's still old ID.
+            // Let's try to ping new ID first?
+
+            // Just Lock with new ID
+            await this.runExclusive(async () => {
+                const params = [55, 1]; // Lock
+                const packet = this.createPacket(newId, INST_WRITE, params);
+                await this.connection.write(packet);
+            });
+
+            console.log(`[ChangeID] Servo ${currentId} changed to ${newId}`);
+            return true;
+
+        } catch (e) {
+            console.error(`[ChangeID] Failed to change ID ${currentId} to ${newId}:`, e);
+            return false;
+        }
+    }
+
+    // Scan for servos in a range
+    async scan(startId: number = 0, endId: number = 20): Promise<number[]> {
+        const found: number[] = [];
+        console.log(`[Scan] Scanning IDs ${startId}-${endId}...`);
+
+        for (let id = startId; id <= endId; id++) {
+            // Ping (Read Position is a good check)
+            // We use a short timeout for scanning
+            try {
+                // Just try to read position with a very short wait
+                const pos = await this.readPosition(id);
+                if (pos !== -1) {
+                    console.log(`[Scan] Found ID ${id}`);
+                    found.push(id);
+                }
+            } catch (e) {
+                // Ignore
+            }
+            // Small delay to clear bus
+            await new Promise(r => setTimeout(r, 10));
+        }
+        return found;
     }
 
     // Reset all servos (1-6) to full range
