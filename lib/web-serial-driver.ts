@@ -208,6 +208,28 @@ export class RobotDriver {
         await this.writeRegister(id, 40, enable ? 1 : 0, 1); // Address 40 is usually Torque Enable
     }
 
+    // SYNC WRITE: Send same instruction to multiple servos at once
+    // Address = Register Address
+    // dataLen = Length of data per servo
+    // items = Array of { id, bytes }
+    async syncWrite(address: number, dataLen: number, items: { id: number, bytes: number[] }[]) {
+        await this.runExclusive(async () => {
+            const params = [address, dataLen];
+            for (const item of items) {
+                params.push(item.id);
+                params.push(...item.bytes);
+            }
+            // ID 0xFE (254) is Broadcast ID
+            const packet = this.createPacket(0xFE, INST_SYNC_WRITE, params);
+            await this.connection.write(packet);
+        });
+    }
+
+    async setTorqueSync(ids: number[], enable: boolean) {
+        const items = ids.map(id => ({ id, bytes: [enable ? 1 : 0] }));
+        await this.syncWrite(40, 1, items); // Address 40, 1 byte
+    }
+
     async readPacket(expectedId: number, length: number): Promise<Uint8Array | null> {
         // Simple polling read. In production, need a robust parser buffer.
         // For STS: Header(2) + ID(1) + Len(1) + Error(1) + Params(N) + Checksum(1)

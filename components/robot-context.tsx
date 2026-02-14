@@ -272,6 +272,26 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     }, []); // Stable loop 
     // If robots changes, we restart loop. That's fine.
 
+    // ----------- ON UNLOAD CLEANUP -----------
+    useEffect(() => {
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            // Attempt to stop all robots
+            // Note: This is best-effort. Browsers may kill scripts quickly.
+            // We use the ref to get current state without dependencies
+            const currentRobots = stateRef.current.robots;
+            Object.values(currentRobots).forEach(bot => {
+                if (bot.connected && bot.driver) {
+                    // Use Sync Write for instant "ALL OFF" command
+                    // This is much faster than 6 individual writes and more likely to succeed before page death
+                    bot.driver.setTorqueSync([1, 2, 3, 4, 5, 6], false).catch(err => console.error(err));
+                }
+            });
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, []);
+
     // ----------- ACTIONS -----------
 
     const addRobot = async () => {
@@ -296,8 +316,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
                 setActiveRobotId(id); // Auto-select new robot
                 addLog(`Connected to ${newBot.name}`);
 
-                // Disable Torque initially
-                for (let i = 1; i <= 6; i++) await newDriver.setTorque(i, false);
+                // Disable Torque initially using Sync Write
+                await newDriver.setTorqueSync([1, 2, 3, 4, 5, 6], false);
             } else {
                 addLog("Failed to connect to new robot");
             }
@@ -310,6 +330,10 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     const disconnectRobot = async (id: string) => {
         const bot = robots[id];
         if (bot) {
+            addLog(`Disconnecting ${bot.name}...`);
+            // Disable torque before disconnecting using Sync Write
+            await bot.driver.setTorqueSync([1, 2, 3, 4, 5, 6], false);
+
             await bot.driver.disconnect();
             setRobots(prev => {
                 const next = { ...prev };

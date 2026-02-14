@@ -1,4 +1,4 @@
-import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink, Maximize2, Minimize2, Edit2, ArrowRightLeft } from "lucide-react";
+import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink, Maximize2, Minimize2, Edit2, ArrowRightLeft, Monitor } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { VisualKeyboard } from "@/components/visual-keyboard";
 import { GamepadVisualizer } from "@/components/gamepad-visualizer";
 import { ResizableSplitPane } from "@/components/resizable-split-pane";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { MotorConfigWizard } from "@/components/motor-config-wizard";
 import {
     AlertDialog,
@@ -255,6 +256,16 @@ export function RobotControlPanel() {
 
     // --- LOGIC: Active Tab determines Active Interaction Mode ---
 
+    const [isWebSerialSupported, setIsWebSerialSupported] = useState(true);
+
+    useEffect(() => {
+        // Check for Web Serial API support
+        if (typeof navigator !== 'undefined') {
+            const supported = 'serial' in navigator;
+            setIsWebSerialSupported(supported);
+        }
+    }, []);
+
     // 1. Free Mode Logic
     useEffect(() => {
         if (!connected) return;
@@ -335,6 +346,48 @@ export function RobotControlPanel() {
 
     // Calculate Robot Count
     const robotCount = Object.keys(robots).length;
+
+    if (!isWebSerialSupported) {
+        return (
+            <div className="w-full h-full min-h-[600px] flex flex-col items-center justify-center bg-zinc-950 p-8 text-center space-y-6 animate-in fade-in duration-500">
+                <div className="bg-red-500/10 p-6 rounded-full ring-1 ring-red-500/50 shadow-[0_0_30px_-10px_rgba(239,68,68,0.5)]">
+                    <AlertTriangle className="w-16 h-16 text-red-500" />
+                </div>
+                <div className="max-w-md space-y-2">
+                    <h2 className="text-2xl font-bold text-white">Browser Not Supported</h2>
+                    <p className="text-zinc-400">
+                        This application requires the <span className="text-orange-400 font-mono">Web Serial API</span> to communicate with the robot.
+                    </p>
+                </div>
+                <div className="bg-zinc-900/50 p-4 rounded-lg border border-zinc-800 max-w-sm w-full">
+                    <p className="text-sm text-zinc-500 mb-3 uppercase tracking-wider font-bold">Recommended Browsers</p>
+                    <div className="flex justify-center gap-6">
+                        <div className="flex flex-col items-center gap-2 group cursor-help">
+                            <div className="w-10 h-10 bg-blue-500/20 rounded-lg flex items-center justify-center border border-blue-500/30 group-hover:bg-blue-500/30 transition-colors">
+                                <Monitor className="w-5 h-5 text-blue-400" />
+                            </div>
+                            <span className="text-xs text-zinc-400">Chrome</span>
+                        </div>
+                        <div className="flex flex-col items-center gap-2 group cursor-help">
+                            <div className="w-10 h-10 bg-green-500/20 rounded-lg flex items-center justify-center border border-green-500/30 group-hover:bg-green-500/30 transition-colors">
+                                <Monitor className="w-5 h-5 text-green-400" />
+                            </div>
+                            <span className="text-xs text-zinc-400">Edge</span>
+                        </div>
+                        <div className="flex flex-col items-center gap-2 group cursor-help">
+                            <div className="w-10 h-10 bg-red-500/20 rounded-lg flex items-center justify-center border border-red-500/30 group-hover:bg-red-500/30 transition-colors">
+                                <Monitor className="w-5 h-5 text-red-400" />
+                            </div>
+                            <span className="text-xs text-zinc-400">Opera</span>
+                        </div>
+                    </div>
+                </div>
+                <p className="text-xs text-zinc-600 max-w-xs">
+                    Firefox and Safari do not currently implement the Web Serial standard.
+                </p>
+            </div>
+        );
+    }
 
     return (
         <div ref={panelRef} className={`w-full mx-auto p-4 sm:p-6 lg:p-8 bg-zinc-950/50 rounded-2xl border border-zinc-800 backdrop-blur-xl flex flex-col relative ${isFullscreen ? 'max-w-none h-screen' : 'max-w-6xl min-h-[600px]'}`}>
@@ -534,7 +587,7 @@ export function RobotControlPanel() {
                             min="0" max="2" step="0.1"
                             value={speedMultiplier}
                             onChange={(e) => setSpeedMultiplier(Number(e.target.value))}
-                            className="w-20 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-green-500"
+                            className="w-20 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
                         />
                         <span className="text-xs font-mono text-white w-8">{speedMultiplier.toFixed(1)}x</span>
                     </div>
@@ -568,23 +621,23 @@ export function RobotControlPanel() {
             {/* Main Interface */}
             <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
                 <TabsList className="grid w-full grid-cols-6 mb-6 bg-zinc-900/50 p-1">
-                    <TabsTrigger value="teleop" className="data-[state=active]:bg-zinc-800">
+                    <TabsTrigger value="teleop" className="data-[active]:bg-primary/10 data-[active]:text-primary data-[active]:font-bold transition-all">
                         <Sliders className="mr-2 w-4 h-4" /> Joint Control
                     </TabsTrigger>
-                    <TabsTrigger value="keyboard" className="data-[state=active]:bg-zinc-800">
+                    <TabsTrigger value="keyboard" className="data-[active]:bg-primary/10 data-[active]:text-primary data-[active]:font-bold transition-all">
                         <Keyboard className="mr-2 w-4 h-4" /> Keyboard
                     </TabsTrigger>
-                    <TabsTrigger value="gamepad" className="data-[state=active]:bg-zinc-800">
+                    <TabsTrigger value="gamepad" className="data-[active]:bg-primary/10 data-[active]:text-primary data-[active]:font-bold transition-all">
                         <Gamepad2 className="mr-2 w-4 h-4" /> Gamepad
                     </TabsTrigger>
-                    <TabsTrigger value="free" className="data-[state=active]:bg-purple-900/30 data-[state=active]:text-purple-400">
+                    <TabsTrigger value="free" className="data-[active]:bg-primary/10 data-[active]:text-primary data-[active]:font-bold transition-all">
                         <Hand className="mr-2 w-4 h-4" /> Lead Through
                     </TabsTrigger>
-                    <TabsTrigger value="settings" className="data-[state=active]:bg-zinc-800">
-                        <Settings className="mr-2 w-4 h-4" /> Settings
-                    </TabsTrigger>
-                    <TabsTrigger value="leader" className="data-[state=active]:bg-orange-500/10 data-[state=active]:text-orange-500">
+                    <TabsTrigger value="leader" className="data-[active]:bg-primary/10 data-[active]:text-primary data-[active]:font-bold transition-all">
                         <Users className="mr-2 w-4 h-4" /> Leader Mode
+                    </TabsTrigger>
+                    <TabsTrigger value="settings" className="data-[active]:bg-primary/10 data-[active]:text-primary data-[active]:font-bold transition-all">
+                        <Settings className="mr-2 w-4 h-4" /> Settings
                     </TabsTrigger>
                 </TabsList>
 
@@ -650,18 +703,24 @@ export function RobotControlPanel() {
                                 className="flex-1"
                                 left={
                                     <div className="h-full flex flex-col p-4 overflow-auto">
-                                        <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
-                                            <Sliders className="w-4 h-4" /> Manual Joint Control
-                                            {syncControl && <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded ml-2">SYNC ON</span>}
-                                            {calibrationState === 'cal' && (
-                                                <div className="ml-auto flex items-center gap-2">
-                                                    <span className="text-xs text-yellow-500 animate-pulse font-mono">CALIBRATION MODE</span>
-                                                    <Button onClick={finishCalibration} size="sm" className="h-7 bg-blue-600 hover:bg-blue-700 text-white text-xs">
-                                                        Finish Calibration
-                                                    </Button>
-                                                </div>
-                                            )}
-                                        </h3>
+                                        <div className="text-center space-y-2 mb-6">
+                                            <h3 className="text-xl font-bold text-white">Joint Control</h3>
+                                            <p className="text-zinc-500 text-sm">Precise independent joint manipulation</p>
+                                        </div>
+
+                                        {(syncControl || calibrationState === 'cal') && (
+                                            <div className="flex items-center justify-center gap-2 mb-4">
+                                                {syncControl && <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded font-mono">SYNC ON</span>}
+                                                {calibrationState === 'cal' && (
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-xs text-yellow-500 animate-pulse font-mono">CALIBRATION MODE</span>
+                                                        <Button onClick={finishCalibration} size="sm" className="h-7 bg-blue-600 hover:bg-blue-700 text-white text-xs">
+                                                            Finish Calibration
+                                                        </Button>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
                                         <div className="space-y-5">
                                             {[0, 1, 2, 3, 4, 5].map((joint) => {
                                                 const limits = calibrationLimits[joint] || { min: 0, max: 4095 };
@@ -708,18 +767,24 @@ export function RobotControlPanel() {
                             />
                         ) : (
                             <div className="flex-1 p-4">
-                                <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
-                                    <Sliders className="w-4 h-4" /> Manual Joint Control
-                                    {syncControl && <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded ml-2">SYNC ON</span>}
-                                    {calibrationState === 'cal' && (
-                                        <div className="ml-auto flex items-center gap-2">
-                                            <span className="text-xs text-yellow-500 animate-pulse font-mono">CALIBRATION MODE</span>
-                                            <Button onClick={finishCalibration} size="sm" className="h-7 bg-blue-600 hover:bg-blue-700 text-white text-xs">
-                                                Finish Calibration
-                                            </Button>
-                                        </div>
-                                    )}
-                                </h3>
+                                <div className="text-center space-y-2 mb-6">
+                                    <h3 className="text-xl font-bold text-white">Joint Control</h3>
+                                    <p className="text-zinc-500 text-sm">Precise independent joint manipulation</p>
+                                </div>
+
+                                {(syncControl || calibrationState === 'cal') && (
+                                    <div className="flex items-center justify-center gap-2 mb-4">
+                                        {syncControl && <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded font-mono">SYNC ON</span>}
+                                        {calibrationState === 'cal' && (
+                                            <div className="flex items-center gap-2">
+                                                <span className="text-xs text-yellow-500 animate-pulse font-mono">CALIBRATION MODE</span>
+                                                <Button onClick={finishCalibration} size="sm" className="h-7 bg-blue-600 hover:bg-blue-700 text-white text-xs">
+                                                    Finish Calibration
+                                                </Button>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                                 <div className="space-y-5 max-w-xl mx-auto">
                                     {[0, 1, 2, 3, 4, 5].map((joint) => {
                                         const limits = calibrationLimits[joint] || { min: 0, max: 4095 };
@@ -954,6 +1019,327 @@ export function RobotControlPanel() {
                         )}
                     </TabsContent>
 
+                    {/* LEADER MODE TAB */}
+                    <TabsContent value="leader" className="h-full mt-0 flex flex-col">
+                        <div className="w-full flex justify-end px-4 mb-4">
+                            <div className="flex items-center gap-2">
+                                <Switch
+                                    id="show-cameras-leader"
+                                    checked={showCamerasInTabs}
+                                    onCheckedChange={setShowCamerasInTabs}
+                                />
+                                <Label htmlFor="show-cameras-leader" className="text-zinc-400 text-xs">
+                                    Show Cameras
+                                </Label>
+                            </div>
+                        </div>
+
+                        {showCamerasInTabs ? (
+                            <ResizableSplitPane
+                                defaultLeftWidth={splitWidth}
+                                minLeftWidth={40}
+                                maxLeftWidth={75}
+                                onResize={setSplitWidth}
+                                className="flex-1"
+                                left={
+                                    <div className="h-full p-4 overflow-y-auto overflow-x-hidden flex flex-col items-center justify-center">
+                                        <div className="text-center space-y-2 mb-6">
+                                            <h3 className="text-xl font-bold text-white">Leader-Follower</h3>
+                                            <p className="text-zinc-500 text-sm">Synchronize movements between two robots.</p>
+                                        </div>
+                                        <div className="@container w-full max-w-4xl space-y-6">
+                                            <div className="w-full space-y-6">
+
+                                                {/* SELECTION FLEX LAYOUT */}
+                                                <div className="flex flex-row items-center gap-4 w-full">
+
+                                                    {/* INPUTS COLUMN */}
+                                                    <div className="flex flex-col gap-3 flex-1 min-w-0">
+
+                                                        {/* LEADER INPUT */}
+                                                        <div>
+                                                            <div className="flex items-center justify-between mb-1.5">
+                                                                <Label className="text-orange-500 font-bold uppercase tracking-wider text-[10px] flex items-center gap-2">
+                                                                    <Activity className="w-3 h-3" /> Leader
+                                                                </Label>
+                                                                <span className="text-[10px] text-zinc-500">Free to move</span>
+                                                            </div>
+                                                            <Select
+                                                                value={leaderRobotId || ""}
+                                                                onValueChange={setLeaderRobotId}
+                                                                disabled={isLeaderFollowerActive}
+                                                            >
+                                                                <SelectTrigger className="h-10 text-sm bg-zinc-950 border-zinc-700 focus:ring-orange-500/50 w-full">
+                                                                    <span className="truncate">
+                                                                        {leaderRobotId ? robots[leaderRobotId]?.name || leaderRobotId : "Select Leader"}
+                                                                    </span>
+                                                                </SelectTrigger>
+                                                                <SelectContent>
+                                                                    {Object.values(robots)
+                                                                        .filter(r => r.id !== followerRobotId)
+                                                                        .map(bot => (
+                                                                            <SelectItem key={bot.id} value={bot.id}>
+                                                                                {bot.name}
+                                                                            </SelectItem>
+                                                                        ))}
+                                                                </SelectContent>
+                                                            </Select>
+                                                        </div>
+
+                                                        {/* FOLLOWER INPUT */}
+                                                        <div>
+                                                            <div className="flex items-center justify-between mb-1.5">
+                                                                <Label className="text-orange-500 font-bold uppercase tracking-wider text-[10px] flex items-center gap-2">
+                                                                    <Activity className="w-3 h-3" /> Follower
+                                                                </Label>
+                                                                <span className="text-[10px] text-zinc-500">Rigid mimic</span>
+                                                            </div>
+                                                            <Select
+                                                                value={followerRobotId || ""}
+                                                                onValueChange={setFollowerRobotId}
+                                                                disabled={isLeaderFollowerActive}
+                                                            >
+                                                                <SelectTrigger className="h-10 text-sm bg-zinc-950 border-zinc-700 focus:ring-orange-500/50 w-full">
+                                                                    <span className="truncate">
+                                                                        {followerRobotId ? robots[followerRobotId]?.name || followerRobotId : "Select Follower"}
+                                                                    </span>
+                                                                </SelectTrigger>
+                                                                <SelectContent>
+                                                                    {Object.values(robots)
+                                                                        .filter(r => r.id !== leaderRobotId)
+                                                                        .map(bot => (
+                                                                            <SelectItem key={bot.id} value={bot.id}>
+                                                                                {bot.name}
+                                                                            </SelectItem>
+                                                                        ))}
+                                                                </SelectContent>
+                                                            </Select>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* SWAP BUTTON (RIGHT SIDE) */}
+                                                    <div className="flex flex-col justify-center items-center shrink-0">
+                                                        <Button
+                                                            variant="ghost"
+                                                            className="h-12 w-12 rounded-full hover:bg-orange-950/30 hover:text-orange-500 border border-zinc-800/50"
+                                                            disabled={isLeaderFollowerActive}
+                                                            onClick={() => {
+                                                                const oldLeader = leaderRobotId;
+                                                                const oldFollower = followerRobotId;
+                                                                setLeaderRobotId(oldFollower);
+                                                                setFollowerRobotId(oldLeader);
+                                                            }}
+                                                        >
+                                                            <ArrowRightLeft className="!w-5 !h-5 text-zinc-400 rotate-90" />
+                                                        </Button>
+                                                    </div>
+                                                </div>
+
+                                                {Object.values(robots).length < 2 && (
+                                                    <p className="text-center text-sm text-amber-500 flex items-center justify-center gap-2 bg-amber-500/10 p-2 rounded">
+                                                        <AlertTriangle className="w-4 h-4" /> Need at least 2 robots connected.
+                                                    </p>
+                                                )}
+
+                                                <div className="pt-4 border-t border-zinc-800">
+                                                    <Button
+                                                        onClick={toggleLeaderFollower}
+                                                        disabled={!leaderRobotId || !followerRobotId}
+                                                        className={cn(
+                                                            "w-full h-14 text-lg font-bold transition-all shadow-lg",
+                                                            isLeaderFollowerActive
+                                                                ? "bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-red-900/20"
+                                                                : "bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white shadow-orange-900/20"
+                                                        )}
+                                                    >
+                                                        {isLeaderFollowerActive ? (
+                                                            <>
+                                                                <Unlink className="mr-3 h-5 w-5" /> STOP SYNC
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <LinkIcon className="mr-3 h-5 w-5" /> START SYNC
+                                                            </>
+                                                        )}
+                                                    </Button>
+                                                    <p className="text-center text-xs text-zinc-500 mt-3">
+                                                        {isLeaderFollowerActive
+                                                            ? "Leader is compliant. Follower is actively servoing."
+                                                            : "Select robots above and start sync."}
+                                                    </p>
+                                                </div>
+
+                                                {/* STATUS INDICATOR */}
+                                                {isLeaderFollowerActive && (
+                                                    <div className="bg-orange-950/30 border border-orange-900/50 rounded-lg p-4 text-center animate-in fade-in slide-in-from-bottom-4">
+                                                        <p className="text-orange-200 font-mono text-sm flex items-center justify-center gap-2">
+                                                            <Activity className="w-4 h-4 animate-pulse" /> Sync Active • Latency: ~20ms
+                                                        </p>
+                                                    </div>
+                                                )}
+
+                                            </div>
+                                        </div>
+                                    </div>
+                                }
+                                right={
+                                    <div className="h-full flex flex-col p-4 overflow-auto">
+                                        <h3 className="font-semibold text-zinc-300 flex items-center gap-2 mb-4">
+                                            <Video className="w-4 h-4" /> Camera Feeds
+                                        </h3>
+                                        <div className="flex-1 min-h-[300px]">
+                                            <CameraGrid
+                                                cameras={cameras}
+                                                onRemove={removeCamera}
+                                                onAdd={startAddCamera}
+                                            />
+                                        </div>
+                                    </div>
+                                }
+                            />
+                        ) : (
+                            <div className="flex-1 h-full p-4 overflow-y-auto overflow-x-hidden flex flex-col items-center justify-center">
+                                <div className="text-center space-y-2 mb-6">
+                                    <h3 className="text-xl font-bold text-white">Leader-Follower</h3>
+                                    <p className="text-zinc-500 text-sm">Synchronize movements between two robots.</p>
+                                </div>
+                                <div className="@container w-full max-w-4xl space-y-6">
+                                    <div className="w-full bg-zinc-900/50 border border-zinc-800 rounded-xl p-6 space-y-6">
+
+                                        {/* SELECTION FLEX LAYOUT */}
+                                        <div className="flex flex-row items-center gap-4 w-full">
+
+                                            {/* INPUTS COLUMN */}
+                                            <div className="flex flex-col gap-3 flex-1 min-w-0">
+
+                                                {/* LEADER INPUT */}
+                                                <div>
+                                                    <div className="flex items-center justify-between mb-1.5">
+                                                        <Label className="text-orange-500 font-bold uppercase tracking-wider text-[10px] flex items-center gap-2">
+                                                            <Activity className="w-3 h-3" /> Leader
+                                                        </Label>
+                                                        <span className="text-[10px] text-zinc-500">Free to move</span>
+                                                    </div>
+                                                    <Select
+                                                        value={leaderRobotId || ""}
+                                                        onValueChange={setLeaderRobotId}
+                                                        disabled={isLeaderFollowerActive}
+                                                    >
+                                                        <SelectTrigger className="h-10 text-sm bg-zinc-950 border-zinc-700 focus:ring-orange-500/50 w-full">
+                                                            <span className="truncate">
+                                                                {leaderRobotId ? robots[leaderRobotId]?.name || leaderRobotId : "Select Leader"}
+                                                            </span>
+                                                        </SelectTrigger>
+                                                        <SelectContent>
+                                                            {Object.values(robots)
+                                                                .filter(r => r.id !== followerRobotId)
+                                                                .map(bot => (
+                                                                    <SelectItem key={bot.id} value={bot.id}>
+                                                                        {bot.name}
+                                                                    </SelectItem>
+                                                                ))}
+                                                        </SelectContent>
+                                                    </Select>
+                                                </div>
+
+                                                {/* FOLLOWER INPUT */}
+                                                <div>
+                                                    <div className="flex items-center justify-between mb-1.5">
+                                                        <Label className="text-orange-500 font-bold uppercase tracking-wider text-[10px] flex items-center gap-2">
+                                                            <Activity className="w-3 h-3" /> Follower
+                                                        </Label>
+                                                        <span className="text-[10px] text-zinc-500">Rigid mimic</span>
+                                                    </div>
+                                                    <Select
+                                                        value={followerRobotId || ""}
+                                                        onValueChange={setFollowerRobotId}
+                                                        disabled={isLeaderFollowerActive}
+                                                    >
+                                                        <SelectTrigger className="h-10 text-sm bg-zinc-950 border-zinc-700 focus:ring-orange-500/50 w-full">
+                                                            <span className="truncate">
+                                                                {followerRobotId ? robots[followerRobotId]?.name || followerRobotId : "Select Follower"}
+                                                            </span>
+                                                        </SelectTrigger>
+                                                        <SelectContent>
+                                                            {Object.values(robots)
+                                                                .filter(r => r.id !== leaderRobotId)
+                                                                .map(bot => (
+                                                                    <SelectItem key={bot.id} value={bot.id}>
+                                                                        {bot.name}
+                                                                    </SelectItem>
+                                                                ))}
+                                                        </SelectContent>
+                                                    </Select>
+                                                </div>
+                                            </div>
+
+                                            {/* SWAP BUTTON (RIGHT SIDE) */}
+                                            <div className="flex flex-col justify-center items-center shrink-0">
+                                                <Button
+                                                    variant="ghost"
+                                                    className="h-12 w-12 rounded-full hover:bg-orange-950/30 hover:text-orange-500 border border-zinc-800/50"
+                                                    disabled={isLeaderFollowerActive}
+                                                    onClick={() => {
+                                                        const oldLeader = leaderRobotId;
+                                                        const oldFollower = followerRobotId;
+                                                        setLeaderRobotId(oldFollower);
+                                                        setFollowerRobotId(oldLeader);
+                                                    }}
+                                                >
+                                                    <ArrowRightLeft className="!w-5 !h-5 text-zinc-400 rotate-90" />
+                                                </Button>
+                                            </div>
+                                        </div>
+
+                                        {Object.values(robots).length < 2 && (
+                                            <p className="text-center text-sm text-amber-500 flex items-center justify-center gap-2 bg-amber-500/10 p-2 rounded">
+                                                <AlertTriangle className="w-4 h-4" /> Need at least 2 robots connected.
+                                            </p>
+                                        )}
+
+                                        <div className="pt-4 border-t border-zinc-800">
+                                            <Button
+                                                onClick={toggleLeaderFollower}
+                                                disabled={!leaderRobotId || !followerRobotId}
+                                                className={cn(
+                                                    "w-full h-14 text-lg font-bold transition-all shadow-lg",
+                                                    isLeaderFollowerActive
+                                                        ? "bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-red-900/20"
+                                                        : "bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white shadow-orange-900/20"
+                                                )}
+                                            >
+                                                {isLeaderFollowerActive ? (
+                                                    <>
+                                                        <Unlink className="mr-3 h-5 w-5" /> STOP SYNC
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <LinkIcon className="mr-3 h-5 w-5" /> START SYNC
+                                                    </>
+                                                )}
+                                            </Button>
+                                            <p className="text-center text-xs text-zinc-500 mt-3">
+                                                {isLeaderFollowerActive
+                                                    ? "Leader is compliant. Follower is actively servoing."
+                                                    : "Select robots above and start sync."}
+                                            </p>
+                                        </div>
+
+                                        {/* STATUS INDICATOR */}
+                                        {isLeaderFollowerActive && (
+                                            <div className="bg-orange-950/30 border border-orange-900/50 rounded-lg p-4 text-center animate-in fade-in slide-in-from-bottom-4">
+                                                <p className="text-orange-200 font-mono text-sm flex items-center justify-center gap-2">
+                                                    <Activity className="w-4 h-4 animate-pulse" /> Sync Active • Latency: ~20ms
+                                                </p>
+                                            </div>
+                                        )}
+
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </TabsContent>
+
                     {/* SETTINGS TAB */}
                     <TabsContent value="settings" className="space-y-6 mt-0 overflow-y-auto">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1007,156 +1393,18 @@ export function RobotControlPanel() {
                                     </div>
                                 )}
                             </div>
-                        </div>
 
-                        <div className="p-6 bg-zinc-900/30 rounded-xl border border-zinc-800">
-                            <h3 className="text-sm font-mono text-zinc-500 mb-2">SYSTEM LOGS</h3>
-                            <div className="bg-black/50 p-4 rounded-lg h-40 overflow-y-auto text-xs font-mono text-green-400/80">
-                                {logs.map((l, i) => <div key={i}>&gt; {l}</div>)}
+                            <div className="p-6 bg-zinc-900/30 rounded-xl border border-zinc-800">
+                                <h3 className="text-sm font-mono text-zinc-500 mb-2">SYSTEM LOGS</h3>
+                                <div className="bg-black/50 p-4 rounded-lg h-40 overflow-y-auto text-xs font-mono text-green-400/80">
+                                    {logs.map((l, i) => <div key={i}>&gt; {l}</div>)}
+                                </div>
                             </div>
                         </div>
+
                     </TabsContent>
 
-                    {/* LEADER MODE TAB */}
-                    <TabsContent value="leader" className="h-full mt-0 flex flex-col p-6">
-                        <div className="flex flex-col items-center justify-center h-full max-w-2xl mx-auto w-full space-y-8">
 
-                            <div className="text-center space-y-2">
-                                <h3 className="text-2xl font-bold text-white flex items-center justify-center gap-3">
-                                    <Users className="w-8 h-8 text-orange-500" /> Leader-Follower
-                                </h3>
-                                <p className="text-zinc-400">
-                                    Synchronize movements between two robots.
-                                </p>
-                            </div>
-
-                            <div className="w-full bg-zinc-900/50 border border-zinc-800 rounded-xl p-8 space-y-8">
-
-                                {/* SELECTION GRID */}
-                                <div className="flex items-center justify-between gap-4">
-
-                                    {/* LEADER SIDE */}
-                                    <div className="flex-1 space-y-3">
-                                        <Label className="text-orange-500 font-bold uppercase tracking-wider text-xs flex items-center gap-2">
-                                            <Activity className="w-3 h-3" /> Leader (Input)
-                                        </Label>
-                                        <Select
-                                            value={leaderRobotId || ""}
-                                            onValueChange={setLeaderRobotId}
-                                            disabled={isLeaderFollowerActive}
-                                        >
-                                            <SelectTrigger className="h-14 text-lg bg-zinc-950 border-zinc-700 focus:ring-orange-500/50">
-                                                <SelectValue placeholder="Select Leader" />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                                {Object.values(robots)
-                                                    .filter(r => r.id !== followerRobotId)
-                                                    .map(bot => (
-                                                        <SelectItem key={bot.id} value={bot.id}>
-                                                            {bot.name}
-                                                        </SelectItem>
-                                                    ))}
-                                            </SelectContent>
-                                        </Select>
-                                        <p className="text-xs text-zinc-500">
-                                            Motors will be <strong>FREE</strong> to move.
-                                        </p>
-                                    </div>
-
-                                    {/* SWAP BUTTON */}
-                                    <div className="flex flex-col justify-end pb-6">
-                                        <Button
-                                            variant="ghost"
-                                            size="icon"
-                                            className="rounded-full hover:bg-orange-950/30 hover:text-orange-500"
-                                            disabled={isLeaderFollowerActive}
-                                            onClick={() => {
-                                                const oldLeader = leaderRobotId;
-                                                const oldFollower = followerRobotId;
-                                                setLeaderRobotId(oldFollower);
-                                                setFollowerRobotId(oldLeader);
-                                            }}
-                                        >
-                                            <ArrowRightLeft className="w-5 h-5 text-zinc-400" />
-                                        </Button>
-                                    </div>
-
-                                    {/* FOLLOWER SIDE */}
-                                    <div className="flex-1 space-y-3">
-                                        <Label className="text-orange-300 font-bold uppercase tracking-wider text-xs flex items-center gap-2">
-                                            <Activity className="w-3 h-3" /> Follower (Output)
-                                        </Label>
-                                        <Select
-                                            value={followerRobotId || ""}
-                                            onValueChange={setFollowerRobotId}
-                                            disabled={isLeaderFollowerActive}
-                                        >
-                                            <SelectTrigger className="h-14 text-lg bg-zinc-950 border-zinc-700 focus:ring-orange-500/50">
-                                                <SelectValue placeholder="Select Follower" />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                                {Object.values(robots)
-                                                    .filter(r => r.id !== leaderRobotId)
-                                                    .map(bot => (
-                                                        <SelectItem key={bot.id} value={bot.id}>
-                                                            {bot.name}
-                                                        </SelectItem>
-                                                    ))}
-                                            </SelectContent>
-                                        </Select>
-                                        <p className="text-xs text-zinc-500">
-                                            Motors will be <strong>RIGID</strong> and mimic leader.
-                                        </p>
-                                    </div>
-
-                                </div>
-
-                                {Object.values(robots).length < 2 && (
-                                    <p className="text-center text-sm text-amber-500 flex items-center justify-center gap-2 bg-amber-500/10 p-2 rounded">
-                                        <AlertTriangle className="w-4 h-4" /> Need at least 2 robots connected.
-                                    </p>
-                                )}
-
-                                <div className="pt-4 border-t border-zinc-800">
-                                    <Button
-                                        onClick={toggleLeaderFollower}
-                                        disabled={!leaderRobotId || !followerRobotId}
-                                        className={cn(
-                                            "w-full h-16 text-xl font-bold transition-all shadow-lg",
-                                            isLeaderFollowerActive
-                                                ? "bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-red-900/20"
-                                                : "bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-500 hover:to-amber-500 text-white shadow-orange-900/20"
-                                        )}
-                                    >
-                                        {isLeaderFollowerActive ? (
-                                            <>
-                                                <Unlink className="mr-3 h-6 w-6" /> STOP SYNC
-                                            </>
-                                        ) : (
-                                            <>
-                                                <LinkIcon className="mr-3 h-6 w-6" /> START SYNC
-                                            </>
-                                        )}
-                                    </Button>
-                                    <p className="text-center text-xs text-zinc-500 mt-3">
-                                        {isLeaderFollowerActive
-                                            ? "Leader is compliant. Follower is actively servoing."
-                                            : "Select robots above and start sync."}
-                                    </p>
-                                </div>
-
-                                {/* STATUS INDICATOR */}
-                                {isLeaderFollowerActive && (
-                                    <div className="bg-orange-950/30 border border-orange-900/50 rounded-lg p-4 text-center animate-in fade-in slide-in-from-bottom-4">
-                                        <p className="text-orange-200 font-mono text-sm flex items-center justify-center gap-2">
-                                            <Activity className="w-4 h-4 animate-pulse" /> Sync Active • Latency: ~20ms
-                                        </p>
-                                    </div>
-                                )}
-
-                            </div>
-                        </div>
-                    </TabsContent>
                 </div>
             </Tabs >
 
