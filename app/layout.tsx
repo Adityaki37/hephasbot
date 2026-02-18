@@ -18,19 +18,28 @@ export const metadata: Metadata = {
   description: "Web-based robot control interface",
 };
 
-export default function RootLayout({
+
+import { cookies } from "next/headers";
+import { getSession } from "@/lib/auth";
+import { Providers } from "@/components/providers";
+
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const cookieStore = await cookies();
+  const sessionToken = cookieStore.get("hephas_session")?.value;
+  const user = sessionToken ? await getSession(sessionToken) : null;
+
   return (
     <html lang="en">
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        <RobotProvider>
+        <Providers user={user}>
           {children}
-        </RobotProvider>
+        </Providers>
       </body>
     </html>
   );

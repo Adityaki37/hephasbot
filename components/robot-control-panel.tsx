@@ -1,4 +1,4 @@
-import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink, Maximize2, Minimize2, Edit2, ArrowRightLeft, Monitor } from "lucide-react";
+import { Sliders, Camera, Power, RefreshCw, Cpu, Activity, Video, AlertTriangle, Check, RotateCcw, Unlock, Lock, Disc, Play, Square, Settings, Gamepad2, Keyboard, Hand, ChevronRight, Info, Plus, Users, Link as LinkIcon, Unlink, Maximize2, Minimize2, Edit2, ArrowRightLeft, RefreshCcw, Bot, Trash2, Monitor, LogOut, LogIn } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useRobot } from "@/components/robot-context";
 import { cn } from "@/lib/utils";
 import { useGamepad } from "@/hooks/use-gamepad";
+import { useUser } from "@/components/user-session";
 import useMeasure from "react-use-measure";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -103,6 +104,51 @@ function CameraGrid({
     );
 }
 
+
+function SaveProfileDialog({ botId, defaultName, onSave, existingNames }: { botId: string, defaultName: string, onSave: (name: string) => void, existingNames: string[] }) {
+    const [name, setName] = useState(defaultName);
+    const [open, setOpen] = useState(true);
+    const [confirmOverwrite, setConfirmOverwrite] = useState(false);
+
+    const handleSave = () => {
+        if (existingNames.includes(name.trim()) && !confirmOverwrite) {
+            setConfirmOverwrite(true);
+            return;
+        }
+        onSave(name.trim());
+        setOpen(false);
+    };
+
+    return (
+        <AlertDialog open={open} onOpenChange={setOpen}>
+            <AlertDialogContent>
+                <AlertDialogHeader>
+                    <AlertDialogTitle>{confirmOverwrite ? 'Replace Existing Profile?' : 'Save Robot Profile'}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                        {confirmOverwrite
+                            ? `A profile named "${name.trim()}" already exists. Do you want to replace it with the new calibration?`
+                            : 'Give your robot a name to save its calibration settings.'}
+                    </AlertDialogDescription>
+                </AlertDialogHeader>
+                {!confirmOverwrite && (
+                    <div className="py-4">
+                        <Label className="mb-2 block">Robot Name</Label>
+                        <Input value={name} onChange={(e) => { setName(e.target.value); setConfirmOverwrite(false); }} />
+                    </div>
+                )}
+                <AlertDialogFooter>
+                    {confirmOverwrite && (
+                        <AlertDialogCancel onClick={() => setConfirmOverwrite(false)}>Back</AlertDialogCancel>
+                    )}
+                    <AlertDialogAction onClick={handleSave}>
+                        {confirmOverwrite ? 'Replace Profile' : 'Save Profile'}
+                    </AlertDialogAction>
+                </AlertDialogFooter>
+            </AlertDialogContent>
+        </AlertDialog>
+    );
+}
+
 export function RobotControlPanel() {
     const {
         connected,
@@ -113,6 +159,8 @@ export function RobotControlPanel() {
         syncControl,
         setSyncControl,
         disconnectRobot,
+        error,
+        dismissError,
 
         // Leader Follower
         leaderRobotId,
@@ -143,8 +191,16 @@ export function RobotControlPanel() {
         scanMotors,
         followerRobotId,
         setFollowerRobotId,
-        updateRobotName
+        updateRobotName,
+        confirmProfileSelection,
+        saveMakeProfile,
+        userProfiles,
+        deleteRobotProfile,
+        redoCalibration,
+        simulateRobotConnection
     } = useRobot();
+
+    const { user } = useUser();
 
     // Multi-Camera State
     const [cameras, setCameras] = useState<{ id: string, label?: string, stream: MediaStream }[]>([]);
@@ -209,8 +265,9 @@ export function RobotControlPanel() {
             // 4. Good to Go
             startCalibration();
         } catch (error) {
-            console.error("[CalibrationCheck] Error during check:", error);
-            setCalibrationError("Failed to scan motors before calibration.\nCheck console for details.");
+            console.warn("[CalibrationCheck] Motor scan failed (simulated robot?), proceeding anyway:", error);
+            // For simulated robots or when scan fails, just start calibration directly
+            startCalibration();
         }
     };
 
@@ -246,13 +303,9 @@ export function RobotControlPanel() {
     const gpScaleCalc = gamepadBounds.width ? (gamepadBounds.width - PADDING) / BASE_WIDTH : 1.0;
     const gamepadScale = Math.min(Math.max(gpScaleCalc, 0.5), 1.8);
 
-    // Keyboard Scale (can share same base scale logic or tune independently)
+    // Keyboard Scale
     const kbScaleCalc = keyboardBounds.width ? (keyboardBounds.width - PADDING) / 480 : 1.0;
     const keyboardScale = Math.min(Math.max(kbScaleCalc, 0.5), 1.8);
-
-    // Legacy fallback (remove eventually)
-    // const baseScale = showCamerasInTabs ? Math.max(1.0, (splitWidth / 50) * 1.2) : 1.5;
-    // const controlScale = isFullscreen ? baseScale * 1.4 : baseScale;
 
     // --- LOGIC: Active Tab determines Active Interaction Mode ---
 
@@ -267,14 +320,20 @@ export function RobotControlPanel() {
     }, []);
 
     // 1. Free Mode Logic
+    // 1. Free Mode Logic
     useEffect(() => {
         if (!connected) return;
+
+        // If calibrating, do NOT enforce free mode logic based on tabs
+        // This prevents immediate re-locking when switching tabs during calibration startup
+        if (calibrationState === 'cal') return;
+
         if (activeTab === "free") {
             setFreeMode(true);
         } else {
             setFreeMode(false);
         }
-    }, [activeTab, connected, activeRobotId]); // Re-run if robot changes
+    }, [activeTab, connected, activeRobotId, calibrationState]); // Re-run if robot changes
 
     // 2. Gamepad Logic
     const onGamepadMove = useCallback((jointIdx: number, delta: number) => {
@@ -290,10 +349,6 @@ export function RobotControlPanel() {
         enabled: activeTab === 'gamepad',
         onMove: onGamepadMove
     });
-
-    // 3. Keyboard Logic
-    // Handled purely by VisualKeyboard component.
-
 
     // --- Camera Logic ---
     const startAddCamera = async () => {
@@ -382,6 +437,7 @@ export function RobotControlPanel() {
                         </div>
                     </div>
                 </div>
+
                 <p className="text-xs text-zinc-600 max-w-xs">
                     Firefox and Safari do not currently implement the Web Serial standard.
                 </p>
@@ -398,6 +454,23 @@ export function RobotControlPanel() {
                     <MotorConfigWizard onClose={() => setShowWizard(false)} />
                 </div>
             )}
+
+            {/* CONNECTION ERROR DIALOG */}
+            <AlertDialog open={!!error} onOpenChange={(open) => !open && dismissError && dismissError()}>
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle className="text-red-500 flex items-center gap-2">
+                            <AlertTriangle className="h-5 w-5" /> Connection Error
+                        </AlertDialogTitle>
+                        <AlertDialogDescription className="text-zinc-600 dark:text-zinc-300">
+                            {error}
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogAction onClick={() => dismissError && dismissError()}>OK</AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
 
             {/* ERROR DIALOG */}
             <AlertDialog open={!!calibrationError} onOpenChange={(open) => !open && setCalibrationError(null)}>
@@ -498,15 +571,78 @@ export function RobotControlPanel() {
                 </div>
             )}
 
+            {/* PROFILE SELECTION DIALOG */}
+            {
+                activeRobotId && robots[activeRobotId]?.profileSelectionNeeded && (
+                    <AlertDialog open={true}>
+                        <AlertDialogContent>
+                            <AlertDialogHeader>
+                                <AlertDialogTitle>Robot Connected</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                    Do you want to load an existing profile or configure a new robot?
+                                </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <div className="flex flex-col gap-3 py-4">
+                                {userProfiles?.length > 0 && (
+                                    <div className="space-y-2">
+                                        <Label className="text-xs text-zinc-400 uppercase">Existing Profiles</Label>
+                                        <div className="max-h-[200px] overflow-y-auto space-y-2 pr-1">
+                                            {userProfiles.map((p: any) => (
+                                                <Button
+                                                    key={p._id}
+                                                    variant="outline"
+                                                    className="w-full justify-between"
+                                                    onClick={() => confirmProfileSelection(activeRobotId, p)}
+                                                >
+                                                    <span>{p.name}</span>
+                                                    <Badge variant="secondary" className="text-[10px]">Loaded</Badge>
+                                                </Button>
+                                            ))}
+                                        </div>
+                                        <div className="relative py-2">
+                                            <div className="absolute inset-0 flex items-center">
+                                                <span className="w-full border-t border-zinc-800" />
+                                            </div>
+                                            <div className="relative flex justify-center text-xs uppercase">
+                                                <span className="bg-background px-2 text-muted-foreground">Or</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                                <Button
+                                    className="w-full"
+                                    onClick={() => confirmProfileSelection(activeRobotId)}
+                                >
+                                    <Plus className="mr-2 h-4 w-4" /> Configure as New Robot
+                                </Button>
+                            </div>
+                        </AlertDialogContent>
+                    </AlertDialog>
+                )
+            }
+
+            {/* SAVE PROFILE DIALOG */}
+            {
+                activeRobotId && robots[activeRobotId]?.savePromptNeeded && (
+                    <SaveProfileDialog
+                        botId={activeRobotId}
+                        defaultName={robots[activeRobotId].name}
+                        onSave={(name) => saveMakeProfile(activeRobotId, name)}
+                        existingNames={(userProfiles || []).map((p: any) => p.name)}
+                    />
+                )
+            }
+
             {/* Header: Multi-Robot Manager */}
-            <div className="flex flex-col sm:flex-row items-center justify-between mb-6 gap-4 border-b border-zinc-800 pb-6">
-                <div className="flex items-center gap-4">
-                    <div className="bg-primary/10 p-3 rounded-full">
-                        <Activity className="w-6 h-6 text-primary" />
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-6 border-b border-zinc-800 pb-6">
+                {/* Left: Brand */}
+                <div className="flex items-center gap-3 shrink-0">
+                    <div className="bg-primary/10 p-2 rounded-full shrink-0">
+                        <img src="/logo.svg" alt="HephasBot" className="w-8 h-8" />
                     </div>
                     <div>
-                        <h2 className="text-xl font-bold tracking-tight text-white line-clamp-1">HephasBot Control</h2>
-                        <div className="flex items-center gap-2 mt-1">
+                        <h2 className="text-xl font-bold tracking-tight text-white whitespace-nowrap">HephasBot Control</h2>
+                        <div className="flex items-center gap-2 mt-0.5">
                             <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-500' : 'bg-red-500'}`} />
                             <span className="text-xs text-zinc-400 font-mono uppercase">
                                 {robotCount > 0 ? `${robotCount} Connected` : "Offline"}
@@ -515,45 +651,29 @@ export function RobotControlPanel() {
                     </div>
                 </div>
 
-                {/* Right Side Controls */}
-                <div className="flex flex-wrap gap-3 items-center justify-end">
+                {/* Right: Unified Controls Toolbar */}
+                <div className="flex items-center gap-2 flex-wrap justify-end flex-1">
 
-                    {/* SYNC TOGGLE (Visible if > 1 Robot) */}
-                    {robotCount > 1 && (
-                        <div className="flex items-center gap-2 mr-4 bg-zinc-900/50 px-3 py-1.5 rounded-lg border border-zinc-800">
-                            <Switch
-                                id="sync-mode"
-                                checked={syncControl}
-                                onCheckedChange={setSyncControl}
-                                className="data-[state=checked]:bg-blue-600"
-                            />
-                            <Label htmlFor="sync-mode" className="text-xs text-zinc-400 flex items-center gap-1 cursor-pointer">
-                                {syncControl ? <LinkIcon className="w-3 h-3 text-blue-400" /> : <Unlink className="w-3 h-3" />}
-                                Sync Control
-                            </Label>
-                        </div>
-                    )}
-
-                    {/* Robot Selector with Edit */}
+                    {/* 1. Robot Context Controls */}
                     {robotCount > 0 && (
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center mr-2">
                             {editingNameId === activeRobotId ? (
                                 <div className="flex items-center gap-1">
                                     <Input
                                         value={editingNameValue}
                                         onChange={(e) => setEditingNameValue(e.target.value)}
-                                        className="h-9 w-32 text-xs"
+                                        className="h-9 text-xs w-28"
                                         onKeyDown={(e) => e.key === 'Enter' && saveName()}
                                         autoFocus
                                     />
-                                    <Button size="sm" variant="ghost" onClick={saveName} className="h-9 w-9 p-0 hover:bg-green-500/20 hover:text-green-400">
+                                    <Button size="sm" variant="ghost" onClick={saveName} className="h-9 w-9 p-0 hover:bg-green-500/20 hover:text-green-400 shrink-0">
                                         <Check className="w-4 h-4" />
                                     </Button>
                                 </div>
                             ) : (
                                 <div className="flex items-center">
                                     <Select value={activeRobotId || ""} onValueChange={(val) => val && setActiveRobot(val)}>
-                                        <SelectTrigger className="w-[140px] h-9 text-xs">
+                                        <SelectTrigger className="w-[140px] h-9 text-xs bg-zinc-900/50 border-zinc-800">
                                             <span>{activeRobotId && robots[activeRobotId] ? robots[activeRobotId].name : "Select Robot"}</span>
                                         </SelectTrigger>
                                         <SelectContent>
@@ -568,7 +688,7 @@ export function RobotControlPanel() {
                                         <Button
                                             variant="ghost"
                                             size="sm"
-                                            className="h-9 w-9 p-0 ml-1 text-zinc-500 hover:text-white"
+                                            className="h-9 w-9 p-0 ml-1 text-zinc-500 hover:text-white shrink-0"
                                             onClick={() => startEditingName(activeRobotId, robots[activeRobotId].name)}
                                         >
                                             <Edit2 className="w-3 h-3" />
@@ -579,48 +699,92 @@ export function RobotControlPanel() {
                         </div>
                     )}
 
-                    {/* Speed Slider */}
-                    <div className="flex items-center gap-2 bg-zinc-900/50 px-3 py-1.5 rounded-lg border border-zinc-800 mr-2">
-                        <span className="text-xs font-mono text-zinc-500 uppercase">Speed</span>
+                    {/* 2. Speed Control */}
+                    <div className="flex items-center gap-2 bg-zinc-900/50 px-3 py-1.5 rounded-lg border border-zinc-800 h-9">
+                        <span className="text-[10px] font-mono text-zinc-500 uppercase hidden sm:inline">Speed</span>
                         <input
                             type="range"
                             min="0" max="2" step="0.1"
                             value={speedMultiplier}
                             onChange={(e) => setSpeedMultiplier(Number(e.target.value))}
-                            className="w-20 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                            className="w-16 sm:w-20 h-1.5 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
                         />
-                        <span className="text-xs font-mono text-white w-8">{speedMultiplier.toFixed(1)}x</span>
+                        <span className="text-xs font-mono text-white w-8 text-right">{speedMultiplier.toFixed(1)}x</span>
                     </div>
 
-                    <Button onClick={addRobot} variant="outline" size="sm" className="h-9">
-                        <Plus className="mr-2 h-3 w-3" /> Add Robot
-                    </Button>
+                    {/* 3. Sync Toggle (Conditional) */}
+                    {robotCount > 1 && (
+                        <div className="flex items-center gap-2 bg-zinc-900/50 px-3 py-1.5 rounded-lg border border-zinc-800 h-9">
+                            <Switch
+                                id="sync-mode"
+                                checked={syncControl}
+                                onCheckedChange={setSyncControl}
+                                className="scale-75 data-[state=checked]:bg-blue-600"
+                            />
+                            <Label htmlFor="sync-mode" className="text-xs text-zinc-400 flex items-center gap-1 cursor-pointer whitespace-nowrap">
+                                {syncControl ? <LinkIcon className="w-3 h-3 text-blue-400" /> : <Unlink className="w-3 h-3" />}
+                                <span className="hidden sm:inline">Sync</span>
+                            </Label>
+                        </div>
+                    )}
 
-                    <Button
-                        onClick={startAddCamera}
-                        variant="outline"
-                        size="sm"
-                        className="h-9"
-                    >
-                        <Camera className="mr-2 h-3 w-3" />
-                        + Add Camera
-                    </Button>
+                    {/* 4. Combined Actions & Utility Group */}
+                    <div className="flex items-center gap-2">
+                        {/* Divider */}
+                        <div className="w-px h-6 bg-zinc-800 mx-1 hidden sm:block" />
 
-                    <Button
-                        onClick={toggleFullscreen}
-                        variant="ghost"
-                        size="sm"
-                        className="h-9 w-9 p-0"
-                        title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                    >
-                        {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
-                    </Button>
+                        <Button onClick={addRobot} variant="outline" size="sm" className="h-9 px-3 bg-zinc-900/30 border-zinc-800 hover:bg-zinc-800" title="Add Robot">
+                            <Plus className="mr-0 lg:mr-2 h-3.5 w-3.5" /> <span className="hidden lg:inline">Add Robot</span>
+                        </Button>
+
+                        <Button onClick={startAddCamera} variant="outline" size="sm" className="h-9 px-3 bg-zinc-900/30 border-zinc-800 hover:bg-zinc-800" title="Add Camera">
+                            <Camera className="mr-0 lg:mr-2 h-3.5 w-3.5" /> <span className="hidden lg:inline">Camera</span>
+                        </Button>
+
+                        <Button
+                            onClick={toggleFullscreen}
+                            variant="ghost"
+                            size="sm"
+                            className="h-9 w-9 p-0 hover:bg-zinc-800"
+                            title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+                        >
+                            {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                        </Button>
+
+                        {user ? (
+                            <div className="flex items-center gap-3 bg-zinc-900/80 px-3 py-1 rounded-lg border border-zinc-800 h-9 ml-2">
+                                <div className="hidden sm:flex flex-col items-end">
+                                    <span className="text-xs font-bold text-white leading-none">{user.firstName || user.name || "User"}</span>
+                                    <span className="text-[9px] text-zinc-500 uppercase tracking-wide">Logged In</span>
+                                </div>
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-7 w-7 p-0 hover:bg-red-500/20 hover:text-red-400 rounded-md"
+                                    onClick={() => window.location.href = '/auth/logout'}
+                                    title="Log Out"
+                                >
+                                    <LogOut className="w-3.5 h-3.5" />
+                                </Button>
+                            </div>
+                        ) : (
+                            <Button
+                                variant="default"
+                                size="sm"
+                                className="h-9 ml-2 bg-white text-black hover:bg-zinc-200 border border-zinc-200 shadow-sm transition-all hover:scale-105"
+                                onClick={() => window.location.href = '/auth/login'}
+                            >
+                                <LogIn className="mr-2 h-3.5 w-3.5" /> <span className="hidden sm:inline">Log In</span>
+                            </Button>
+                        )}
+                    </div>
                 </div>
             </div>
 
             {/* Main Interface */}
             <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
-                <TabsList className="grid w-full grid-cols-6 mb-6 bg-zinc-900/50 p-1">
+                {/* Desktop Tabs List */}
+                <TabsList className="hidden md:grid w-full grid-cols-6 mb-6 bg-zinc-900/50 p-1">
                     <TabsTrigger value="teleop" className="data-[active]:bg-primary/10 data-[active]:text-primary data-[active]:font-bold transition-all">
                         <Sliders className="mr-2 w-4 h-4" /> Joint Control
                     </TabsTrigger>
@@ -640,6 +804,32 @@ export function RobotControlPanel() {
                         <Settings className="mr-2 w-4 h-4" /> Settings
                     </TabsTrigger>
                 </TabsList>
+
+                {/* Mobile Tabs Dropdown */}
+                <div className="md:hidden mb-6">
+                    <Select value={activeTab} onValueChange={(val) => val && setActiveTab(val)}>
+                        <SelectTrigger className="w-full h-12 bg-zinc-900/50 border-zinc-800 text-base font-medium">
+                            <SelectValue placeholder="Select Control Mode">
+                                <span className="flex items-center">
+                                    {activeTab === 'teleop' && <><Sliders className="mr-2 w-4 h-4" /> Joint Control</>}
+                                    {activeTab === 'keyboard' && <><Keyboard className="mr-2 w-4 h-4" /> Keyboard</>}
+                                    {activeTab === 'gamepad' && <><Gamepad2 className="mr-2 w-4 h-4" /> Gamepad</>}
+                                    {activeTab === 'free' && <><Hand className="mr-2 w-4 h-4" /> Lead Through</>}
+                                    {activeTab === 'leader' && <><Users className="mr-2 w-4 h-4" /> Leader Mode</>}
+                                    {activeTab === 'settings' && <><Settings className="mr-2 w-4 h-4" /> Settings</>}
+                                </span>
+                            </SelectValue>
+                        </SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="teleop"><Sliders className="mr-2 w-4 h-4 inline" /> Joint Control</SelectItem>
+                            <SelectItem value="keyboard"><Keyboard className="mr-2 w-4 h-4 inline" /> Keyboard</SelectItem>
+                            <SelectItem value="gamepad"><Gamepad2 className="mr-2 w-4 h-4 inline" /> Gamepad</SelectItem>
+                            <SelectItem value="free"><Hand className="mr-2 w-4 h-4 inline" /> Lead Through</SelectItem>
+                            <SelectItem value="leader"><Users className="mr-2 w-4 h-4 inline" /> Leader Mode</SelectItem>
+                            <SelectItem value="settings"><Settings className="mr-2 w-4 h-4 inline" /> Settings</SelectItem>
+                        </SelectContent>
+                    </Select>
+                </div>
 
                 <div className="flex-1 bg-black/20 rounded-xl border border-zinc-800/50 p-6 relative overflow-hidden">
                     {/* Disconnected Overlay (If 0 robots) */}
@@ -1342,15 +1532,68 @@ export function RobotControlPanel() {
 
                     {/* SETTINGS TAB */}
                     <TabsContent value="settings" className="space-y-6 mt-0 overflow-y-auto">
+                        <div className="flex items-center justify-between mb-2">
+                            <h3 className="text-lg font-medium text-white">Settings</h3>
+                            <Button onClick={() => simulateRobotConnection && simulateRobotConnection()} variant="destructive" size="sm">
+                                Change Profile
+                            </Button>
+                        </div>
+
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            {/* Saved Profiles */}
+                            <div className="p-6 bg-zinc-900/30 rounded-xl border border-zinc-800 md:col-span-2">
+                                <h3 className="text-lg font-medium mb-4 text-white flex items-center gap-2"><Bot className="w-5 h-5" /> Saved Profiles</h3>
+                                {userProfiles && userProfiles.length > 0 ? (
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                        {userProfiles.map((p: any) => (
+                                            <div key={p._id} className="bg-zinc-900 border border-zinc-800 rounded-lg p-3 flex items-center justify-between group">
+                                                <div className="flex items-center gap-3 overflow-hidden">
+                                                    <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 shrink-0">
+                                                        <Bot className="w-4 h-4" />
+                                                    </div>
+                                                    <div className="min-w-0">
+                                                        <p className="text-sm font-medium text-zinc-200 truncate">{p.name}</p>
+                                                        <p className="text-xs text-zinc-500">
+                                                            {new Date(p.lastUpdated || p._creationTime).toLocaleDateString()}
+                                                        </p>
+                                                    </div>
+                                                </div>
+                                                <Button
+                                                    variant="ghost"
+                                                    size="icon"
+                                                    className="text-zinc-500 hover:text-red-500 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                                                    onClick={() => deleteRobotProfile(p._id, p.name)}
+                                                >
+                                                    <Trash2 className="w-4 h-4" />
+                                                </Button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <p className="text-sm text-zinc-500 italic">No saved profiles found.</p>
+                                )}
+                            </div>
+
                             <div className="p-6 bg-zinc-900/30 rounded-xl border border-zinc-800">
                                 <h3 className="text-lg font-medium mb-4 text-white flex items-center gap-2"><Activity className="w-5 h-5" /> Calibration</h3>
                                 <div className="flex flex-col gap-4">
                                     <p className="text-sm text-zinc-500">
                                         Calibrating: <span className="text-white font-mono">{activeRobotId ? robots[activeRobotId]?.name : 'None'}</span>
                                     </p>
-                                    <div className="flex gap-3">
-                                        <Button onClick={handleSafeCalibrationStart} variant="outline" disabled={!connected || calibrationState === 'cal'}>Start</Button>
+                                    <div className="flex flex-wrap gap-3">
+                                        <Button
+                                            variant="secondary"
+                                            onClick={() => {
+                                                if (activeRobotId) {
+                                                    redoCalibration(activeRobotId);
+                                                    setActiveTab('teleop');
+                                                }
+                                            }}
+                                            disabled={!connected}
+                                        >
+                                            <RefreshCcw className="w-4 h-4 mr-2" />
+                                            Redo Calibration
+                                        </Button>
                                         <Button onClick={finishCalibration} disabled={calibrationState !== 'cal'} className="bg-blue-600 hover:bg-blue-700">Finish</Button>
                                     </div>
                                 </div>
@@ -1409,7 +1652,7 @@ export function RobotControlPanel() {
             </Tabs >
 
             {/* Persistent Recording Footer */}
-            < div className="mt-4 p-4 bg-zinc-900/80 border border-zinc-800 rounded-xl flex items-center justify-between" >
+            {/* <div className="mt-4 p-4 bg-zinc-900/80 border border-zinc-800 rounded-xl flex items-center justify-between">
                 <div className="flex items-center gap-4">
                     <div className={`p-2 rounded-full ${isRecording ? 'bg-red-500/20 text-red-500 animate-pulse' : 'bg-zinc-800 text-zinc-600'}`}>
                         <Disc className="w-5 h-5" />
@@ -1442,7 +1685,7 @@ export function RobotControlPanel() {
                         PLAY
                     </Button>
                 </div>
-            </div >
+            </div> */}
         </div >
     );
 }

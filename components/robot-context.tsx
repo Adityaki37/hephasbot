@@ -2,6 +2,9 @@
 
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { RobotDriver } from '@/lib/web-serial-driver';
+import { useMutation, useQuery } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import { useUser } from "@/components/user-session";
 
 type CalibrationState = 'unc' | 'cal' | 'finishing' | 'rdy';
 
@@ -19,49 +22,46 @@ export interface RobotInstance {
     calibrationState: CalibrationState;
     jointVals: number[];
     calibrationLimits: CalibrationLimit[];
-    // We could track individual recording/free modes, but for now we might share or keep per-bot.
-    // Let's keep these per-bot since one might be recording while another is not? 
-    // Actually, distinct Free Mode is useful. 
     freeMode: boolean;
+    // Navigation Flags
+    profileSelectionNeeded: boolean;
+    savePromptNeeded: boolean;
 }
 
 interface RobotContextType {
-    // Fleet State
     robots: Record<string, RobotInstance>;
     activeRobotId: string | null;
     syncControl: boolean;
     logs: string[];
-
-    // Actions
-    // Actions
+    error: string | null;
+    dismissError: () => void;
     addRobot: () => Promise<void>;
     setActiveRobot: (id: string) => void;
     setSyncControl: (enabled: boolean) => void;
     disconnectRobot: (id: string) => Promise<void>;
 
-    // Active Robot Proxies (or Unified Actions)
-    // These generally apply to the active robot, or ALL if syncControl is true for movements.
+    // Proxies
     connect: () => Promise<void>;
-
-    // Speed
-    setSpeedMultiplier: (speed: number) => void;
-    speedMultiplier: number;
-
-    // Joint Control
-    moveJoint: (jointIdx: number, value: number) => void;
-    moveJointRel: (jointIdx: number, percentChange: number) => void;
-    startManualMove: (jointIdx: number, direction: number) => void;
+    moveJoint: (jointIndex: number, angle: number) => Promise<void>;
+    moveJointRel: (jointIndex: number, delta: number) => Promise<void>;
+    startManualMove: (jointIndex: number, direction: number) => void;
     stopManualMove: () => void;
-
-    // Config
     startCalibration: () => void;
-    finishCalibration: () => void;
+    finishCalibration: () => Promise<void>;
     setFreeMode: (enabled: boolean) => Promise<void>;
 
-    // Motor Config Wizard
+    isRecording: boolean;
+    isPlaying: boolean;
+    recordedTraj: number[][];
+    toggleRecording: () => void;
+    playRecording: () => Promise<void>;
+
+    speedMultiplier: number;
+    setSpeedMultiplier: (speed: number) => void;
+
+    // Config
     scanMotors: (botId: string) => Promise<number[]>;
     configureMotorId: (botId: string, currentId: number, newId: number) => Promise<boolean>;
-    // Isolation
     setMotorIsolation: (botId: string, targetId: number | null, allIds: number[]) => Promise<void>;
 
     // Leader-Follower
@@ -71,268 +71,250 @@ interface RobotContextType {
     setFollowerRobotId: (id: string | null) => void;
     isLeaderFollowerActive: boolean;
     toggleLeaderFollower: () => Promise<void>;
+    updateRobotName: (id: string, name: string) => void;
 
-    // Naming
-    updateRobotName: (id: string, newName: string) => void;
-
-    // Recording (Global for now, uses Active Robot or All?)
-    // Let's make recording capture ALL robots if sync is on? 
-    // For simplicity, recording is currently designed for one trajectory. 
-    // We will bind recording to the ACTIVE robot for now.
-    isRecording: boolean;
-    isPlaying: boolean;
-    recordedTraj: number[][]; // Stores active robot's path
-    toggleRecording: () => void;
-    playRecording: () => Promise<void>;
-
-    // Helpers
     item: string;
-    activeRobot: RobotInstance | null; // Helper accessor
+    activeRobot: RobotInstance | null;
+
+    // Profile Helpers
+    userProfiles: any[];
+    confirmProfileSelection: (botId: string, profile?: any) => void;
+    saveMakeProfile: (botId: string, name: string) => Promise<void>;
+    deleteRobotProfile: (profileId: string, profileName: string) => Promise<void>;
+    redoCalibration: (botId: string) => Promise<void>;
+    simulateRobotConnection: () => Promise<void>;
 }
 
-const RobotContext = createContext<RobotContextType | undefined>(undefined);
+export const RobotContext = createContext<RobotContextType | null>(null);
 
 export function RobotProvider({ children }: { children: React.ReactNode }) {
-    // FLEET STATE
     const [robots, setRobots] = useState<Record<string, RobotInstance>>({});
     const [activeRobotId, setActiveRobotId] = useState<string | null>(null);
     const [syncControl, setSyncControl] = useState(false);
-
     const [logs, setLogs] = useState<string[]>([]);
-
-    const [isRecording, setIsRecording] = useState(false);
-    const [isPlaying, setIsPlaying] = useState(false);
-    const [recordedTraj, setRecordedTraj] = useState<number[][]>([]); // For the active robot
-
-    // Speed Control
-    const [speedMultiplier, setSpeedMultiplier] = useState(1.0);
 
     // Leader-Follower State
     const [leaderRobotId, setLeaderRobotId] = useState<string | null>(null);
     const [followerRobotId, setFollowerRobotId] = useState<string | null>(null);
     const [isLeaderFollowerActive, setIsLeaderFollowerActive] = useState(false);
 
-    // Helpers
-    const activeRobot = activeRobotId ? robots[activeRobotId] : null;
+    // Recording State
+    const [isRecording, setIsRecording] = useState(false);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [recordedTraj, setRecordedTraj] = useState<number[][]>([]);
 
-    const moveInterval = useRef<NodeJS.Timeout | null>(null);
-    const j5PositionsRef = useRef<Map<string, Set<number>>>(new Map()); // id -> map
+    // Speed Control
+    const [speedMultiplier, setSpeedMultiplier] = useState(1.0);
 
-    const addLog = (msg: string) => setLogs(prev => [msg, ...prev].slice(0, 10));
+    // Global Error State
+    const [error, setError] = useState<string | null>(null);
 
-    // REF TO LATEST STATE (Fixes stale closures in setInterval/Timeouts)
-    const stateRef = useRef({ robots, activeRobotId, syncControl, speedMultiplier, isLeaderFollowerActive, leaderRobotId, followerRobotId, isRecording });
-    useEffect(() => {
-        stateRef.current = { robots, activeRobotId, syncControl, speedMultiplier, isLeaderFollowerActive, leaderRobotId, followerRobotId, isRecording };
-    }, [robots, activeRobotId, syncControl, speedMultiplier, isLeaderFollowerActive, leaderRobotId, followerRobotId, isRecording]);
+    // User Session
+    const { user } = useUser();
+    const userId = user?.id;
+    const userProfiles = useQuery(api.robots.listProfiles, userId ? { userId } : "skip");
+    const saveCalibrationMutation = useMutation(api.robots.saveCalibration);
+    const deleteProfileMutation = useMutation(api.robots.deleteProfile);
 
-    // ----------- POLLING LOOP (FLEET WIDE) -----------
-    useEffect(() => {
-        let active = true;
-        const isValidPosition = (val: number) => val >= 0 && val <= 4095;
+    const addLog = (msg: string) => setLogs(prev => [...prev.slice(-49), msg]);
 
-        const runLoop = async () => {
-            if (!active) return;
+    // Helpers need to be defined before usage
+    const applyToTargets = async (fn: (bot: RobotInstance) => Promise<void>) => {
+        if (syncControl) {
+            await Promise.all(Object.values(robots).map(bot => fn(bot)));
+        } else if (activeRobotId && robots[activeRobotId]) {
+            await fn(robots[activeRobotId]);
+        }
+    };
 
-            // Reading from stateRef ensures we always have latest state without restarting loop
-            const { robots, activeRobotId, isRecording, isLeaderFollowerActive, leaderRobotId, followerRobotId } = stateRef.current;
-
-            const robotIds = Object.keys(robots);
-            if (robotIds.length === 0) {
-                setTimeout(runLoop, 200);
-                return;
-            }
-
-            // We iterate all robots to update their state
-            // But we can't easily update state in a loop without functional updates.
-            // We will collect updates and apply once.
-
-            const updates: Record<string, Partial<RobotInstance>> = {};
-            let updatesFound = false;
-
-            for (const id of robotIds) {
-                const bot = robots[id];
-                if (!bot.connected || !bot.driver) continue;
-
-                // Conditions to read
-                const shouldRead = bot.calibrationState === 'cal' || bot.freeMode || (id === activeRobotId && isRecording) || (isLeaderFollowerActive && id === leaderRobotId);
-
-                if (!shouldRead) continue;
-
-                const readings: number[] = [];
-                for (let i = 0; i < 6; i++) {
-                    try {
-                        const raw = await bot.driver.readPosition(i + 1);
-                        readings.push((raw !== -1 && isValidPosition(raw)) ? raw : -1);
-                    } catch (e) {
-                        readings.push(-1);
-                    }
-                }
-
-                // 1. CALIBRATION LOGIC
-                if (bot.calibrationState === 'cal') {
-                    // Track J5
-                    if (readings[4] !== -1) {
-                        if (!j5PositionsRef.current.has(id)) j5PositionsRef.current.set(id, new Set());
-                        const set = j5PositionsRef.current.get(id)!;
-                        set.add(Math.round(readings[4] / 20) * 20);
-                    }
-
-                    // Update limits
-                    const newLimits = [...bot.calibrationLimits];
-                    let limitsChanged = false;
-                    readings.forEach((val, i) => {
-                        if (val !== -1) {
-                            if (val < newLimits[i].min) { newLimits[i].min = val; limitsChanged = true; }
-                            if (val > newLimits[i].max) { newLimits[i].max = val; limitsChanged = true; }
-                        }
-                    });
-
-                    if (limitsChanged) {
-                        updates[id] = { ...updates[id], calibrationLimits: newLimits };
-                        updatesFound = true;
-                    }
-                }
-
-                // 2. SYNC JOINTS
-                if (bot.calibrationState === 'cal' || bot.freeMode || (isLeaderFollowerActive && id === leaderRobotId)) {
-                    const newVals = readings.map((val, i) => {
-                        if (val === -1) return bot.jointVals[i];
-
-                        if (bot.calibrationState === 'cal') {
-                            // Raw: 0->-100, 2048->0, 4095->100
-                            return ((val - 2048) / 2048) * 100;
-                        } else {
-                            // Calibrated
-                            const limit = bot.calibrationLimits[i];
-                            const range = limit.max - limit.min;
-                            if (range > 0) {
-                                const norm = (val - limit.min) / range;
-                                return Math.max(-100, Math.min(100, (norm * 200) - 100));
-                            }
-                            return 0;
-                        }
-                    });
-
-                    // Only update if different enough? Or just update.
-                    updates[id] = { ...updates[id], jointVals: newVals };
-                    updatesFound = true;
-
-                    // 3. RECORDING (Only Active Robot)
-                    if (isRecording && id === activeRobotId) {
-                        setRecordedTraj(prev => [...prev, [...newVals]]);
-                    }
-                }
-            }
-
-            // --- LEADER FOLLOWER SYNC ---
-            if (active && isLeaderFollowerActive && leaderRobotId && followerRobotId && leaderRobotId !== followerRobotId) {
-                const leaderUpdate = updates[leaderRobotId];
-                if (leaderUpdate && leaderUpdate.jointVals) {
-                    // Write to Follower
-                    // Check if follower exists in updates (or current state)
-                    // We must use `robots` for limits, but `updates` might have new values? Limits change rarely.
-                    const follower = robots[followerRobotId];
-
-                    if (follower && follower.connected) {
-                        const leaderVals = leaderUpdate.jointVals; // This is % (-100 to 100)
-
-                        // Write to Follower using its limits
-                        for (let i = 0; i < 6; i++) {
-                            const val = leaderVals[i];
-                            const limit = follower.calibrationLimits[i];
-                            const range = limit.max - limit.min;
-                            const norm = (val + 100) / 200;
-                            let target = Math.floor(limit.min + (norm * range));
-                            target = Math.max(0, Math.min(4095, Math.max(limit.min, Math.min(limit.max, target))));
-
-                            // Async fire and forget? 
-                            follower.driver.setPosition(i + 1, target).catch(() => { });
-                        }
-                    }
-                }
-            }
-
-            // Apply updates
-            if (updatesFound) {
-                setRobots(prev => {
-                    const next = { ...prev };
-                    Object.keys(updates).forEach(id => {
-                        next[id] = { ...next[id], ...updates[id] };
-                    });
-                    return next;
-                });
-            }
-
-            if (active) setTimeout(runLoop, isRecording ? 50 : 100);
-        };
-
-        runLoop();
-        return () => { active = false; };
-    }, []); // Stable loop 
-    // If robots changes, we restart loop. That's fine.
-
-    // ----------- ON UNLOAD CLEANUP -----------
-    useEffect(() => {
-        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-            // Attempt to stop all robots
-            // Note: This is best-effort. Browsers may kill scripts quickly.
-            // We use the ref to get current state without dependencies
-            const currentRobots = stateRef.current.robots;
-            Object.values(currentRobots).forEach(bot => {
-                if (bot.connected && bot.driver) {
-                    // Use Sync Write for instant "ALL OFF" command
-                    // This is much faster than 6 individual writes and more likely to succeed before page death
-                    bot.driver.setTorqueSync([1, 2, 3, 4, 5, 6], false).catch(err => console.error(err));
-                }
-            });
-        };
-
-        window.addEventListener('beforeunload', handleBeforeUnload);
-        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-    }, []);
-
-    // ----------- ACTIONS -----------
+    // Helper for torque
+    const setAllTorque = async (bot: RobotInstance, enabled: boolean) => {
+        try {
+            await bot.driver.setTorqueSync([1, 2, 3, 4, 5, 6], enabled);
+        } catch (e) { console.error(e); }
+    };
 
     const addRobot = async () => {
         const newDriver = new RobotDriver();
         try {
-            const success = await newDriver.connect();
-            if (success) {
-                const id = crypto.randomUUID();
-                const num = Object.keys(robots).length + 1;
-                const newBot: RobotInstance = {
-                    id,
-                    name: `Robot ${num}`,
-                    driver: newDriver,
-                    connected: true,
-                    calibrationState: 'unc', // Explicitly uncalibrated on connect
-                    jointVals: [0, 0, 0, 0, 0, 0],
-                    calibrationLimits: Array(6).fill(null).map(() => ({ min: 0, max: 4095 })),
-                    freeMode: false
-                };
+            // Connect now throws error on failure (e.g. port already open)
+            await newDriver.connect();
 
-                setRobots(prev => ({ ...prev, [id]: newBot }));
-                setActiveRobotId(id); // Auto-select new robot
-                addLog(`Connected to ${newBot.name}`);
+            // Connection Successful
+            const id = crypto.randomUUID();
+            const num = Object.keys(robots).length + 1;
+            const shouldSelectProfile = !!userId;
 
-                // Disable Torque initially using Sync Write
-                await newDriver.setTorqueSync([1, 2, 3, 4, 5, 6], false);
-            } else {
-                addLog("Failed to connect to new robot");
+            // Read initial positions
+            const initialJointVals = [0, 0, 0, 0, 0, 0];
+            try {
+                for (let i = 0; i < 6; i++) {
+                    const pos = await newDriver.readPosition(i + 1);
+                    if (!isNaN(pos) && pos !== -1) {
+                        initialJointVals[i] = ((pos / 4095) * 200) - 100;
+                    }
+                }
+            } catch (e) {
+                console.error("Failed to read initial positions", e);
             }
+
+            const newBot: RobotInstance = {
+                id,
+                name: `Robot ${num}`,
+                driver: newDriver,
+                connected: true,
+                calibrationState: 'unc',
+                jointVals: initialJointVals,
+                calibrationLimits: Array(6).fill(null).map(() => ({ min: 0, max: 4095 })),
+                freeMode: false,
+                profileSelectionNeeded: shouldSelectProfile,
+                savePromptNeeded: false
+            };
+
+            setRobots(prev => ({ ...prev, [id]: newBot }));
+            setActiveRobotId(id);
+            addLog(`Connected to ${newBot.name}`);
+            await newDriver.setTorqueSync([1, 2, 3, 4, 5, 6], false);
+
+        } catch (e: any) {
+            // 1. User Cancelled
+            if (e.name === 'NotFoundError') {
+                return;
+            }
+
+            // 2. Port Connection Error
+            let errorMessage = `Connection error: ${e}`;
+            if (e && (e.name === 'InvalidStateError' || (e.message && e.message.includes("port is already open")))) {
+                errorMessage = "This robot is connected in another tab or the port is busy.";
+                console.warn("Port already open:", e);
+            } else {
+                console.error(e);
+            }
+
+            addLog(errorMessage);
+            setError(errorMessage);
+        }
+    };
+
+    const simulateRobotConnection = async () => {
+        const id = crypto.randomUUID();
+        const num = Object.keys(robots).length + 1;
+        const newBot: RobotInstance = {
+            id,
+            name: `Simulated Robot ${num}`,
+            driver: new RobotDriver(), // Mock driver effectively
+            connected: true,
+            calibrationState: 'unc',
+            jointVals: [0, 0, 0, 0, 0, 0],
+            calibrationLimits: Array(6).fill(null).map(() => ({ min: 0, max: 4095 })),
+            freeMode: false,
+            profileSelectionNeeded: true,
+            savePromptNeeded: false
+        };
+        setRobots(prev => ({ ...prev, [id]: newBot }));
+        setActiveRobotId(id);
+        addLog(`Simulated connection to ${newBot.name}`);
+    };
+
+    const confirmProfileSelection = (botId: string, profile?: any) => {
+        console.log(`[RobotContext] Confirming profile selection for ${botId}`, profile);
+        setRobots(prev => {
+            const next = { ...prev };
+            const bot = { ...next[botId] };
+            if (!bot) {
+                console.warn(`[RobotContext] Robot ${botId} not found during profile selection`);
+                return prev;
+            }
+
+            if (profile) {
+                bot.name = profile.name;
+                bot.calibrationLimits = profile.calibrationLimits;
+                bot.calibrationState = 'rdy';
+                addLog(`Loaded profile: ${profile.name}`);
+            } else {
+                // New Robot
+                addLog(`Configuring as New Robot`);
+            }
+            bot.profileSelectionNeeded = false;
+            console.log(`[RobotContext] Updated robot state:`, bot);
+            next[botId] = bot;
+            return next;
+        });
+    };
+
+    const saveMakeProfile = async (botId: string, name: string) => {
+        // CRITICAL: Get latest robot state to ensure we save actual limits
+        setRobots(prev => {
+            const bot = prev[botId];
+            if (!bot) return prev; // Should not happen
+
+            // Optimistic update for name
+            const updatedBot = { ...bot, name, savePromptNeeded: false };
+
+            // Perform async save side-effect here to capture LATEST limits
+            if (userId) {
+                saveCalibrationMutation({
+                    userId,
+                    name,
+                    calibrationLimits: updatedBot.calibrationLimits
+                }).then(() => {
+                    addLog(`Saved profile: ${name}`);
+                }).catch(e => {
+                    console.error("Cloud Save Failed", e);
+                    addLog(`Error saving profile: ${e}`);
+                });
+            }
+
+            return { ...prev, [botId]: updatedBot };
+        });
+    };
+
+    const deleteRobotProfile = async (profileId: string, profileName: string) => {
+        if (!userId) return;
+        try {
+            await deleteProfileMutation({ userId, name: profileName });
+            addLog(`Deleted profile: ${profileName}`);
         } catch (e) {
-            console.error(e);
-            addLog(`Connection error: ${e}`);
+            addLog(`Error deleting profile: ${e}`);
+        }
+    };
+
+    const redoCalibration = async (botId: string) => {
+        setRobots(prev => {
+            const bot = prev[botId];
+            if (!bot) return prev;
+            return {
+                ...prev,
+                [botId]: {
+                    ...bot,
+                    calibrationState: 'unc',
+                    // Reset to defaults for re-calibration? Or keep existing?
+                    // User probably wants to start fresh or refine.
+                    // Let's reset to full range to allow movement during cal.
+                    calibrationLimits: Array(6).fill(null).map(() => ({ min: 0, max: 4095 })),
+                    savePromptNeeded: false
+                }
+            };
+        });
+        // Optionally auto-start calibration?
+        // Let's just reset state and let user click "Start Calibration" in wizard (which will open)
+        // Actually, we need to trigger the wizard or the "Start" flow.
+        // The wizard opens if calState is 'unc' or 'cal' usually.
+        // We'll let the UI handle the "Show Wizard" part based on state.
+        if (activeRobotId === botId) {
+            startCalibration(); // Auto-start the process logic
         }
     };
 
     const disconnectRobot = async (id: string) => {
         const bot = robots[id];
         if (bot) {
-            addLog(`Disconnecting ${bot.name}...`);
-            // Disable torque before disconnecting using Sync Write
-            await bot.driver.setTorqueSync([1, 2, 3, 4, 5, 6], false);
+            // Safety: Disable torque before disconnecting
+            try {
+                await setAllTorque(bot, false);
+            } catch (e) {
+                console.warn(`Failed to disable torque before disconnect for ${bot.name}`, e);
+            }
 
             await bot.driver.disconnect();
             setRobots(prev => {
@@ -341,228 +323,325 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
                 return next;
             });
             if (activeRobotId === id) {
-                setActiveRobotId(Object.keys(robots).find(k => k !== id) || null);
+                setActiveRobotId(null);
             }
-            addLog(`Disconnected ${bot.name}`);
+            addLog(`Disconnected from ${bot.name}`);
         }
     };
 
-    // --- JOINT MOVEMENTS (SYNC SUPPORT) ---
-
-    // Generic helper to apply function to target(s)
-    const applyToTargets = async (fn: (bot: RobotInstance) => Promise<void> | void) => {
-        const { robots, activeRobotId, syncControl } = stateRef.current;
-        const targets: RobotInstance[] = [];
-        if (syncControl) {
-            Object.values(robots).forEach(b => { if (b.connected) targets.push(b); });
-        } else if (activeRobotId && robots[activeRobotId]) {
-            targets.push(robots[activeRobotId]);
-        }
-
-        await Promise.all(targets.map(fn));
-    };
-
-    const moveJoint = async (jointIdx: number, value: number) => {
-        if (!activeRobotId && !syncControl) return;
-
-        // Optimistic UI update for active robot immediately
-        if (activeRobotId && robots[activeRobotId]) {
-            // We can't easily optimistic update "All" in state without flicker or complexity.
-            // But for the active one, we should.
-            const bot = robots[activeRobotId];
-            if (!bot.freeMode) {
-                // Update state
-                setRobots(prev => {
-                    const next = { ...prev };
-                    const b = { ...next[activeRobotId!] };
-                    const vals = [...b.jointVals];
-                    vals[jointIdx] = value;
-                    b.jointVals = vals;
-                    next[activeRobotId!] = b;
-                    return next;
-                });
-            }
-        }
-
-        await applyToTargets(async (bot) => {
-            if (bot.freeMode) return;
-            if (bot.calibrationState !== 'rdy') return; // Enforce readiness
-
-            const limit = bot.calibrationLimits[jointIdx];
-            const range = limit.max - limit.min;
-            const norm = (value + 100) / 200;
-            let target = Math.floor(limit.min + (norm * range));
-
-            // Clamp
-            target = Math.max(limit.min, Math.min(limit.max, target));
-            target = Math.max(0, Math.min(4095, target));
-
-            await bot.driver.setPosition(jointIdx + 1, target);
-        });
-    };
-
-    const moveJointRel = async (jointIdx: number, percentChange: number) => {
-        // More complex for Sync: relative to EACH robot's current pos?
-        // Yes.
-        await applyToTargets(async (bot) => {
-            if (bot.freeMode) return;
-            // Read current effective percentage
-            // We can use bot.jointVals[jointIdx] which is -100..100
-            const current = bot.jointVals[jointIdx];
-            // Apply speed multiplier
-            const { speedMultiplier } = stateRef.current;
-            const delta = (percentChange / 100) * 200 * speedMultiplier;
-            const next = Math.max(-100, Math.min(100, current + delta));
-
-            // call internal move helper (duplicate logic but eh)
-            // Better to just call moveJoint logic inline or extract
-
-            const limit = bot.calibrationLimits[jointIdx];
-            const range = limit.max - limit.min;
-            const norm = (next + 100) / 200;
-            const target = Math.max(0, Math.min(4095, Math.floor(limit.min + (norm * range))));
-
-            await bot.driver.setPosition(jointIdx + 1, target);
-
-            // We need to update state so successive relative moves work
-            // But we are in a loop update...
-            // Let's force update state for everyone? Expensive?
-            // Not really for <5 robots.
-            setRobots(prev => {
-                const n = { ...prev };
-                if (n[bot.id]) {
-                    const vals = [...n[bot.id].jointVals];
-                    vals[jointIdx] = next;
-                    n[bot.id] = { ...n[bot.id], jointVals: vals };
+    // Safety: Ensure torque is disabled on page unload/refresh
+    useEffect(() => {
+        const handleUnload = () => {
+            const currentRobots = robotsRef.current;
+            Object.values(currentRobots).forEach(bot => {
+                if (bot.connected) {
+                    // Best effort to disable torque. 
+                    // sendBeacon or similar would be better but WebSerial requires active context.
+                    // We just fire and hope the browser allows the serial write before killing the thread.
+                    // setTorqueSync is synchronous-ish at the driver level for writes if possible.
+                    bot.driver.setTorqueSync([1, 2, 3, 4, 5, 6], false).catch(e => console.error(e));
                 }
-                return n;
+            });
+        };
+        window.addEventListener('beforeunload', handleUnload);
+        return () => window.removeEventListener('beforeunload', handleUnload);
+    }, []);
+
+    // --- MOVEMENT ---
+    const moveJoint = async (jointIndex: number, angle: number) => {
+        await applyToTargets(async (bot) => {
+            // angle is -100 to 100
+            const limit = bot.calibrationLimits[jointIndex];
+            const range = limit.max - limit.min;
+            const normalized = (angle + 100) / 200;
+            const targetPos = Math.floor(limit.min + (normalized * range));
+            const safePos = Math.max(0, Math.min(4095, Math.max(limit.min, Math.min(limit.max, targetPos))));
+
+            await bot.driver.setPosition(jointIndex + 1, safePos);
+
+            // Optimistic update
+            setRobots(prev => {
+                const next = { ...prev };
+                if (next[bot.id]) {
+                    const newVals = [...next[bot.id].jointVals];
+                    newVals[jointIndex] = angle;
+                    next[bot.id] = { ...next[bot.id], jointVals: newVals };
+                }
+                return next;
             });
         });
     };
 
-    // Wrapper for interval checks
-    const startManualMove = (jointIdx: number, direction: number) => {
-        if (moveInterval.current) return;
-        // Faster interval (30ms) for smoother motion
-        // Smaller step (0.5%) per tick, totaling ~16% per second at 1x speed
-        const tick = () => moveJointRel(jointIdx, direction * 0.5);
-        tick();
-        moveInterval.current = setInterval(tick, 30);
+    const moveJointRel = async (jointIndex: number, delta: number) => {
+        if (activeRobotId && robots[activeRobotId]) {
+            const bot = robots[activeRobotId];
+            const currentVal = bot.jointVals[jointIndex];
+            const newVal = Math.max(-100, Math.min(100, currentVal + delta));
+            moveJoint(jointIndex, newVal);
+        }
+    };
+
+    // --- MANUAL MOVEMENT LOOP ---
+    const manualMoveRef = useRef<{ joint: number, dir: number } | null>(null);
+
+    const startManualMove = (jointIndex: number, direction: number) => {
+        manualMoveRef.current = { joint: jointIndex, dir: direction };
     };
 
     const stopManualMove = () => {
-        if (moveInterval.current) {
-            clearInterval(moveInterval.current);
-            moveInterval.current = null;
-        }
+        manualMoveRef.current = null;
     };
 
+    // Continuous Movement Loop
+    useEffect(() => {
+        const interval = setInterval(() => {
+            const currentMove = manualMoveRef.current;
+            if (!currentMove || !activeRobotId) return;
 
-    // --- TORQUE HELPER ---
-    const setAllTorque = async (bot: RobotInstance, enable: boolean) => {
-        for (let i = 1; i <= 6; i++) {
-            let success = false;
-            // Retry logic: 3 attempts
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                    await bot.driver.setTorque(i, enable);
-                    success = true;
-                    break;
-                } catch (e) {
-                    console.warn(`[${bot.name}] Failed to set torque for J${i}, attempt ${attempt + 1}`);
-                    await new Promise(r => setTimeout(r, 10));
+            // Targets: Either all (Sync) or specific active
+            const targets: RobotInstance[] = [];
+            const currentRobots = robotsRef.current; // access fresh state via ref
+
+            if (syncControl) {
+                Object.values(currentRobots).forEach(b => {
+                    if (b.connected) targets.push(b);
+                });
+            } else {
+                const bot = currentRobots[activeRobotId];
+                if (bot && bot.connected) targets.push(bot);
+            }
+
+            if (targets.length === 0) return;
+
+            const { joint, dir } = currentMove;
+
+            targets.forEach(bot => {
+                const currentVal = bot.jointVals[joint];
+                const delta = dir * speedMultiplier * 2.0;
+                const newVal = Math.max(-100, Math.min(100, currentVal + delta));
+
+                if (newVal !== currentVal) {
+                    const limit = bot.calibrationLimits[joint];
+                    const range = limit.max - limit.min;
+                    const normalized = (newVal + 100) / 200;
+                    const targetPos = Math.floor(limit.min + (normalized * range));
+                    const safePos = Math.max(0, Math.min(4095, Math.max(limit.min, Math.min(limit.max, targetPos))));
+
+                    // Hardware Move
+                    bot.driver.setPosition(joint + 1, safePos).catch(e => { });
+
+                    // Optimistic State Update
+                    setRobots(prev => {
+                        const next = { ...prev };
+                        if (next[bot.id]) {
+                            const newVals = [...next[bot.id].jointVals];
+                            newVals[joint] = newVal;
+                            next[bot.id] = { ...next[bot.id], jointVals: newVals };
+                        }
+                        return next;
+                    });
+                }
+            });
+        }, 50);
+
+        return () => clearInterval(interval);
+    }, [activeRobotId, speedMultiplier, syncControl]);
+
+    // Keep a ref to latest robots state so the polling interval can read it
+    // without being a dependency (which would cause infinite re-creation).
+    const robotsRef = useRef(robots);
+    useEffect(() => { robotsRef.current = robots; }, [robots]);
+
+    // Polling Loop for Joint Values (single stable loop, runs once on mount)
+    useEffect(() => {
+        const intervalId = setInterval(async () => {
+            const currentRobots = robotsRef.current;
+            const connectedIds = Object.keys(currentRobots).filter(id => currentRobots[id].connected);
+            if (connectedIds.length === 0) return;
+
+            for (const id of connectedIds) {
+                const bot = currentRobots[id];
+
+                // Only poll if Calibrating or Free Mode.
+                // In Ready mode, we trust optimistic updates from moveJoint.
+                if (bot.calibrationState !== 'cal' && !bot.freeMode) {
+                    continue;
+                }
+
+                const newVals = [...bot.jointVals];
+                let changed = false;
+                const newLimits = bot.calibrationLimits.map(l => ({ ...l }));
+                let limitsChanged = false;
+
+                for (let i = 0; i < 6; i++) {
+                    try {
+                        const pos = await bot.driver.readPosition(i + 1);
+                        // -1 is the error code from the driver
+                        if (isNaN(pos) || pos === -1) continue;
+
+                        let angle = 0;
+
+                        if (bot.calibrationState === 'cal') {
+                            // During calibration: map raw 0-4095 to -100..100
+                            angle = ((pos / 4095) * 200) - 100;
+                        } else {
+                            // Free mode / ready: map using calibrated limits
+                            const limit = bot.calibrationLimits[i];
+                            const range = limit.max - limit.min;
+                            if (range <= 0) {
+                                angle = 0;
+                            } else {
+                                const clampedPos = Math.max(limit.min, Math.min(limit.max, pos));
+                                const normalized = (clampedPos - limit.min) / range;
+                                angle = (normalized * 200) - 100;
+                            }
+                        }
+
+                        if (Math.abs(angle - newVals[i]) > 0.5) {
+                            newVals[i] = angle;
+                            changed = true;
+                        }
+
+                        // Expand calibration limits during calibration
+                        if (bot.calibrationState === 'cal') {
+                            const limit = newLimits[i];
+                            if (limit.min > limit.max) {
+                                limit.min = pos;
+                                limit.max = pos;
+                                limitsChanged = true;
+                            } else {
+                                if (pos < limit.min) { limit.min = pos; limitsChanged = true; }
+                                if (pos > limit.max) { limit.max = pos; limitsChanged = true; }
+                            }
+                        }
+                    } catch (e) { }
+                }
+
+                if (changed || limitsChanged) {
+                    setRobots(prev => ({
+                        ...prev,
+                        [id]: {
+                            ...prev[id],
+                            jointVals: newVals,
+                            calibrationLimits: limitsChanged ? newLimits : prev[id].calibrationLimits
+                        }
+                    }));
                 }
             }
-            if (!success) addLog(`[${bot.name}] Warning: Failed to set torque J${i}`);
 
-            // Small delay between servos to prevent flooding serial bus
-            await new Promise(r => setTimeout(r, 10));
-        }
-    };
+        }, 150);
+        return () => clearInterval(intervalId);
+    }, []); // Run once on mount
 
-    // --- CALIBRATION (Active Only) ---
-    // Calibration is complex to sync. Let's force Calibration to be PER ROBOT (Active).
-    // Syncing calibration seems dangerous/confusing.
 
-    const startCalibration = async () => {
+    // --- CALIBRATION ---
+    const startCalibration = () => {
         if (!activeRobotId) return;
         const id = activeRobotId;
-        const bot = robots[id];
-
-        addLog(`[${bot.name}] Starting Calibration...`);
-        // Use robust helper
-        await setAllTorque(bot, false);
-
-        j5PositionsRef.current.delete(id); // Clear history
-
-        // Initial READ to prevent big jump
-        const initLimits: CalibrationLimit[] = [];
-        for (let i = 0; i < 6; i++) {
-            const val = await bot.driver.readPosition(i + 1);
-            const safe = (val !== -1 && val >= 0 && val <= 4095) ? val : 2048;
-            initLimits.push({ min: safe, max: safe });
-        }
-
         setRobots(prev => ({
             ...prev,
             [id]: {
                 ...prev[id],
-                calibrationLimits: initLimits,
-                calibrationState: 'cal'
+                calibrationState: 'cal',
+                // Reset limits to "inverted" state to capture fresh range
+                calibrationLimits: Array(6).fill(null).map(() => ({ min: 4096, max: -1 }))
             }
         }));
+        // Disable torque for all servos to allow manual movement
+        const bot = robots[id];
+        if (bot) {
+            setAllTorque(bot, false);
+            addLog(`[${bot.name}] Calibration started. Move robot to limits.`);
+        }
     };
 
     const finishCalibration = async () => {
         if (!activeRobotId) return;
         const id = activeRobotId;
-        const bot = robots[id];
 
-        // Update state to finishing
-        setRobots(prev => ({ ...prev, [id]: { ...prev[id], calibrationState: 'finishing' } }));
+        setRobots(prev => {
+            const bot = prev[id];
+            if (!bot) return prev;
 
-        // Config Hardware Limits
-        addLog(`[${bot.name}] Configuring hardware limits...`);
-        for (let i = 0; i < 6; i++) {
-            const servoId = i + 1;
-            // J5 Safety (Hardware 0-4095)
-            if (i === 4) {
-                await bot.driver.unlockEEPROM(servoId);
-                await bot.driver.setPositionLimits(servoId, 0, 4095);
-                await bot.driver.lockEEPROM(servoId);
-                continue;
+            // 1. Identify Uncalibrated Joints and Lock Them
+            const newLimits = bot.calibrationLimits.map((limit, idx) => {
+                // If min > max, it means it was NEVER touched (still at 4096, -1)
+                const isUntouched = limit.min > limit.max;
+
+                if (isUntouched) {
+                    // Lock it to safe center
+                    return { min: 2048, max: 2048 };
+                }
+
+                // If touched but min==max (didn't move), allow a small buffer?
+                // Or just keep it as is (locked)
+                // If min=max, range is 0. moveJoint will stick to min.
+                return limit;
+            });
+
+            return {
+                ...prev,
+                [id]: {
+                    ...bot,
+                    calibrationLimits: newLimits,
+                    calibrationState: 'finishing'
+                }
+            };
+        });
+
+        // RE-READ logic from previous step, but now unnecessary to read hardware again 
+        // because we have been polling!
+        // Just write the limits from STATE to HARDWARE.
+
+        addLog(`[${robots[id]?.name}] Configuring hardware limits...`);
+        const bot = robots[id]; // Warning: this might be slightly stale if setRobots hasn't processed
+
+        // Wait a tick for state to settle? 
+        // Ideally we pass 'newLimits' to a function that does the hardware write.
+        // Let's just do it.
+
+        setTimeout(async () => {
+            // We need to get the LATEST limits from the updated state, or re-calculate them here.
+            // Since we can't easily access the NEXT state here, let's re-derive or use a ref.
+            // Actually, 'newLimits' calculated above inside setRobots function is LOCAL to that function.
+            // We need to access it here.
+
+            // Redo calculation locally for hardware write:
+            const currentBot = robotsRef.current[id]; // Use Ref for latest
+            const limitsToWrite = currentBot.calibrationLimits.map(l => {
+                if (l.min > l.max) return { min: 2048, max: 2048 };
+                return l;
+            });
+
+            for (let i = 0; i < 6; i++) {
+                const servoId = i + 1;
+                let limit = limitsToWrite[i];
+
+                // Apply to Hardware
+                try {
+                    if (limit.min > limit.max) [limit.min, limit.max] = [limit.max, limit.min];
+                    await currentBot.driver.unlockEEPROM(servoId);
+                    await currentBot.driver.setPositionLimits(servoId, limit.min, limit.max);
+                    await currentBot.driver.lockEEPROM(servoId);
+                } catch (e) { }
             }
 
-            const limit = bot.calibrationLimits[i];
-            let min = Math.max(0, Math.min(4095, limit.min));
-            let max = Math.max(0, Math.min(4095, limit.max));
-            if (min > max) [min, max] = [max, min];
+            await new Promise(r => setTimeout(r, 200));
+            await setAllTorque(currentBot, true);
 
-            // Write to EEPROM if different
-            try {
-                const curr = await bot.driver.readPositionLimits(servoId);
-                if (curr.min !== min || curr.max !== max) {
-                    await bot.driver.unlockEEPROM(servoId);
-                    await bot.driver.setPositionLimits(servoId, min, max);
-                    await bot.driver.lockEEPROM(servoId);
+            setRobots(prev => ({
+                ...prev,
+                [id]: {
+                    ...prev[id],
+                    calibrationLimits: limitsToWrite, // Ensure state matches hardware
+                    calibrationState: 'rdy',
+                    savePromptNeeded: !!userId
                 }
-            } catch (e) {/* ignore */ }
-        }
+            }));
+            addLog(`[${currentBot.name}] Calibration Ready!`);
 
-        await new Promise(r => setTimeout(r, 200));
-        // Re-enable Torque using robust helper
-        await setAllTorque(bot, true);
+        }, 100);
 
-        // Final State Update
-        setRobots(prev => ({
-            ...prev,
-            [id]: { ...prev[id], calibrationState: 'rdy' }
-        }));
-
-        // Trigger a read to sync sliders
-        // (Handled by next poll loop essentially, but we reset sliders to 0 or sync?)
-        // The loop will sync them.
-        addLog(`[${bot.name}] Calibration Ready!`);
     };
 
     // --- FREE MODE (Subject to Sync?) ---
@@ -678,10 +757,22 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
     };
 
     const updateRobotName = (id: string, newName: string) => {
-        setRobots(prev => ({
-            ...prev,
-            [id]: { ...prev[id], name: newName }
-        }));
+        setRobots(prev => {
+            const next = { ...prev };
+            let bot = { ...next[id], name: newName };
+
+            // Try to load profile for new name
+            if (userProfiles) {
+                const profile = userProfiles.find((p: any) => p.name === newName);
+                if (profile) {
+                    bot.calibrationLimits = profile.calibrationLimits;
+                    bot.calibrationState = 'rdy';
+                }
+            }
+
+            next[id] = bot;
+            return next;
+        });
     };
 
 
@@ -726,6 +817,8 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
             activeRobotId,
             syncControl,
             logs,
+            error,
+            dismissError: () => setError(null),
             addRobot,
             setActiveRobot: setActiveRobotId,
             setSyncControl,
@@ -737,6 +830,15 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
             moveJointRel,
             startManualMove,
             stopManualMove,
+
+            // Profile Helpers
+            userProfiles: userProfiles || [],
+            confirmProfileSelection,
+            saveMakeProfile,
+            deleteRobotProfile,
+            redoCalibration,
+            simulateRobotConnection,
+
             startCalibration,
             finishCalibration,
             setFreeMode,

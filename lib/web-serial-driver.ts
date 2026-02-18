@@ -12,20 +12,17 @@ export class SerialConnection {
             console.error("Web Serial API not supported in this browser");
             return false;
         }
-        try {
-            this.port = await navigator.serial.requestPort();
-            await this.port.open({ baudRate });
+        // Let errors bubble up to caller (addRobot) to avoid unhandled console.errors triggering overlays
+        // and to allow UI to show specific error messages (e.g. "Port already open")
+        this.port = await navigator.serial.requestPort();
+        await this.port.open({ baudRate });
 
-            // Setup writer
-            if (this.port.writable) {
-                this.writer = this.port.writable.getWriter();
-            }
-
-            return true;
-        } catch (error) {
-            console.error("Error connecting to serial port:", error);
-            return false;
+        // Setup writer
+        if (this.port?.writable) {
+            this.writer = this.port.writable.getWriter();
         }
+
+        return true;
     }
 
     async disconnect() {

@@ -2,12 +2,14 @@
 
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowRight, Globe, Zap, Cpu } from "lucide-react";
+import { ArrowRight, Globe, Zap, Cpu, Gamepad } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { RobotControlPanel } from "@/components/robot-control-panel";
 import { cn } from "@/lib/utils";
+import { useUser } from "@/components/user-session";
 
 export default function Home() {
+  const { user } = useUser();
   return (
     <div className="min-h-screen bg-background text-foreground overflow-hidden selection:bg-primary/30">
 
@@ -28,25 +30,60 @@ export default function Home() {
             Hephasbot
           </span>
         </div>
-        <div className="hidden md:flex items-center gap-8 text-sm font-medium text-muted-foreground">
-          <Link href="#features" className="hover:text-foreground transition-colors">Features</Link>
-          <Link href="#control" className="hover:text-foreground transition-colors">Start Control</Link>
-          <Link href="https://github.com" className="hover:text-foreground transition-colors">GitHub</Link>
+        <div className="hidden md:flex absolute left-1/2 -translate-x-1/2 items-center gap-8 text-sm font-medium text-muted-foreground">
+          <Link
+            href="#features"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById("features")?.scrollIntoView({ behavior: "smooth" });
+            }}
+            className="hover:text-foreground transition-colors"
+          >
+            Features
+          </Link>
+          <Link
+            href="#control"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById("control")?.scrollIntoView({ behavior: "smooth" });
+            }}
+            className="hover:text-foreground transition-colors"
+          >
+            Start Control
+          </Link>
+          {/* <Link href="https://github.com" className="hover:text-foreground transition-colors">GitHub</Link> */}
         </div>
         <div className="flex items-center gap-4">
-          <Button variant="outline" className="hidden sm:flex">
+          {/* <Button variant="outline" className="hidden sm:flex">
             Docs
-          </Button>
-          <Link href="#control" className={cn(buttonVariants({ variant: "default" }), "bg-primary text-primary-foreground hover:bg-primary/90")}>
-            Try Now
-          </Link>
+          </Button> */}
+          {user ? (
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-muted-foreground hidden sm:inline-block">
+                Hello, {user.firstName || user.name || "User"}
+              </span>
+              <Link
+                href="/auth/logout"
+                className={cn(buttonVariants({ variant: "outline" }), "text-zinc-500 hover:text-red-500 hover:bg-red-500/10 hover:border-red-500/20")}
+              >
+                Log Out
+              </Link>
+            </div>
+          ) : (
+            <Link
+              href="/auth/login"
+              className={cn(buttonVariants({ variant: "default" }), "bg-primary text-primary-foreground hover:bg-primary/90")}
+            >
+              Log In
+            </Link>
+          )}
         </div>
       </nav>
 
       <main className="relative z-10 flex flex-col items-center">
 
         {/* Hero Section */}
-        <section className="pt-24 pb-12 md:pt-32 md:pb-20 px-6 max-w-5xl mx-auto text-center">
+        <section className="pt-24 pb-12 md:pt-32 md:pb-20 px-6 max-w-5xl mx-auto text-center flex flex-col items-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-muted border border-border mb-8 backdrop-blur-md animate-fade-in-up">
             <span className="relative flex h-2 w-2">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
@@ -69,14 +106,18 @@ export default function Home() {
             {/* Fixed: Use Link directly with buttonVariants to avoid asChild error */}
             <Link
               href="#control"
+              onClick={(e) => {
+                e.preventDefault();
+                document.getElementById("control")?.scrollIntoView({ behavior: "smooth" });
+              }}
               className={cn(buttonVariants({ size: "lg" }), "h-12 px-8 text-base shadow-lg shadow-primary/20")}
             >
               Start Controlling Now <ArrowRight className="ml-2 w-4 h-4" />
             </Link>
 
-            <Button size="lg" variant="outline" className="h-12 px-8 text-base border-border bg-background/50 backdrop-blur-sm hover:bg-accent hover:text-accent-foreground">
+            {/* <Button size="lg" variant="outline" className="h-12 px-8 text-base border-border bg-background/50 backdrop-blur-sm hover:bg-accent hover:text-accent-foreground">
               View Documentation
-            </Button>
+            </Button> */}
           </div>
         </section>
 
@@ -97,16 +138,16 @@ export default function Home() {
             </div>
             <h3 className="text-xl font-bold mb-3">Instant Connect</h3>
             <p className="text-muted-foreground leading-relaxed">
-              Automatic device discovery for SO-100, Aloha, and standard manipulators. Python bridge handles the drivers.
+              Automatic device discovery for SO-100 and SO-101. Built on LeRobot for seamless integration.
             </p>
           </div>
           <div className="p-8 rounded-xl border border-border bg-card hover:bg-accent/50 transition-colors group">
             <div className="w-12 h-12 rounded-lg bg-green-500/10 flex items-center justify-center mb-6 text-green-500 group-hover:scale-110 transition-transform">
-              <Cpu className="w-6 h-6" />
+              <Gamepad className="w-6 h-6" />
             </div>
-            <h3 className="text-xl font-bold mb-3">AI Ready</h3>
+            <h3 className="text-xl font-bold mb-3">Teleoperation Types</h3>
             <p className="text-muted-foreground leading-relaxed">
-              Collect datasets directly from teleop sessions. Compatible with LeRobot training pipelines out of the box.
+              Multiple control modes available: Leader-Follower, Gamepad, Keyboard, and direct Joint Control.
             </p>
           </div>
         </section>
@@ -116,7 +157,10 @@ export default function Home() {
           <div className="max-w-7xl mx-auto">
             <div className="text-center mb-16">
               <h2 className="text-3xl font-bold mb-4 tracking-tight">Command Center</h2>
-              <p className="text-muted-foreground">Direct interface to your local robot hardware.</p>
+              <p className="text-muted-foreground">
+                Direct interface to your local robot hardware <br className="hidden sm:block" />
+                Login to save your robot calibrations
+              </p>
             </div>
 
             <RobotControlPanel />
