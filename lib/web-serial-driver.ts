@@ -264,8 +264,21 @@ export class RobotDriver {
             const params = [addr, readLen];
             const packet = this.createPacket(id, INST_READ, params);
 
-            // Clear buffer before write (hacky but helps) - REMOVED blocking read
-            // await this.connection.read(100);
+            // Clear buffer before write to avoid reading stale data (e.g. write responses)
+            // Aggressively flush until empty
+            try {
+                let flushed = 0;
+                let junk: Uint8Array;
+                do {
+                    junk = await this.connection.read(128, 5); // Short 5ms timeout
+                    flushed += junk.length;
+                    if (flushed > 1000) break; // Safety limit
+                } while (junk.length > 0);
+
+                if (flushed > 0) {
+                    // console.log(`[Driver] Flushed ${flushed} bytes before read`);
+                }
+            } catch (e) { }
 
             await this.connection.write(packet);
 
