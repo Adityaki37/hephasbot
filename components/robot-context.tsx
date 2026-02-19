@@ -78,7 +78,7 @@ interface RobotContextType {
 
     // Profile Helpers
     userProfiles: any[];
-    confirmProfileSelection: (botId: string, profile?: any) => void;
+    confirmProfileSelection: (botId: string, profile?: any) => Promise<void>;
     saveMakeProfile: (botId: string, name: string) => Promise<void>;
     deleteRobotProfile: (profileId: string, profileName: string) => Promise<void>;
     redoCalibration: (botId: string) => Promise<void>;
@@ -134,6 +134,36 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         } catch (e) { console.error(e); }
     };
 
+
+    // Effect: Disconnect all robots on user change (Login/Logout) to prevent state pollution
+    useEffect(() => {
+        const currentRobots = robotsRef.current;
+        const connectedIds = Object.keys(currentRobots).filter(id => currentRobots[id].connected);
+
+        if (connectedIds.length > 0) {
+            console.log("[RobotContext] User session changed. Disconnecting all robots...");
+            addLog("Session changed. Disconnecting all robots...");
+
+            // Disconnect all
+            connectedIds.forEach(async (id) => {
+                const bot = currentRobots[id];
+                try {
+                    await setAllTorque(bot, false); // Safety first
+                    await bot.driver.disconnect();
+                } catch (e) {
+                    console.error(`Failed to clean disconnect ${bot.name}:`, e);
+                }
+            });
+
+            // Wipe state
+            setRobots({});
+            setActiveRobotId(null);
+            setLeaderRobotId(null);
+            setFollowerRobotId(null);
+            setIsLeaderFollowerActive(false);
+        }
+    }, [userId]);
+
     const addRobot = async () => {
         const newDriver = new RobotDriver();
         try {
@@ -149,8 +179,9 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
             const initialJointVals = [0, 0, 0, 0, 0, 0];
             try {
                 for (let i = 0; i < 6; i++) {
-                    const pos = await newDriver.readPosition(i + 1);
+                    let pos = await newDriver.readPosition(i + 1);
                     if (!isNaN(pos) && pos !== -1) {
+                        pos = pos % 4096; // Normalize to single turn
                         initialJointVals[i] = ((pos / 4095) * 200) - 100;
                     }
                 }
@@ -216,8 +247,10 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         addLog(`Simulated connection to ${newBot.name}`);
     };
 
-    const confirmProfileSelection = (botId: string, profile?: any) => {
+    const confirmProfileSelection = async (botId: string, profile?: any) => {
         console.log(`[RobotContext] Confirming profile selection for ${botId}`, profile);
+
+        // 1. Update UI State
         setRobots(prev => {
             const next = { ...prev };
             const bot = { ...next[botId] };
@@ -240,6 +273,39 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
             next[botId] = bot;
             return next;
         });
+
+        // 2. Hardware Sync (if profile loaded)
+        if (profile) {
+            // Use ref to ensure we get the driver even if closure is stale (though driver shouldn't change)
+            const bot = robotsRef.current[botId];
+            if (bot && bot.connected) {
+                addLog(`[${bot.name}] Writing profile limits to hardware...`);
+                const limits = profile.calibrationLimits;
+
+                // Apply to all 6 joints
+                for (let i = 0; i < 6; i++) {
+                    const servoId = i + 1;
+                    const limit = limits[i];
+                    if (limit) {
+                        try {
+                            // Min/Max are usually correct in profile (min < max), but driver expects min/max
+                            // Logic: Unlock -> Write -> Lock
+                            await bot.driver.unlockEEPROM(servoId);
+                            await bot.driver.setPositionLimits(servoId, limit.min, limit.max);
+                            await bot.driver.lockEEPROM(servoId);
+                        } catch (e) {
+                            console.error(`Failed to write limits for servo ${servoId}`, e);
+                        }
+                        // Small delay to prevent bus saturation
+                        await new Promise(r => setTimeout(r, 20));
+                    }
+                }
+                addLog(`[${bot.name}] Hardware limits updated.`);
+
+                // Re-engage torque for readiness
+                await setAllTorque(bot, true);
+            }
+        }
     };
 
     const saveMakeProfile = async (botId: string, name: string) => {
@@ -475,9 +541,12 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
 
                 for (let i = 0; i < 6; i++) {
                     try {
-                        const pos = await bot.driver.readPosition(i + 1);
+                        let pos = await bot.driver.readPosition(i + 1);
                         // -1 is the error code from the driver
                         if (isNaN(pos) || pos === -1) continue;
+
+                        // Normalize to single turn (handle multi-turn overflow)
+                        pos = pos % 4096;
 
                         let angle = 0;
 
@@ -635,9 +704,25 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
                     ...prev[id],
                     calibrationLimits: limitsToWrite, // Ensure state matches hardware
                     calibrationState: 'rdy',
-                    savePromptNeeded: !!userId
+                    savePromptNeeded: false // Auto-saved
                 }
             }));
+
+            // AUTO-SAVE if User is logged in
+            if (userId && currentBot.name) {
+                try {
+                    await saveCalibrationMutation({
+                        userId,
+                        name: currentBot.name,
+                        calibrationLimits: limitsToWrite
+                    });
+                    addLog(`Auto-saved profile: ${currentBot.name}`);
+                } catch (e) {
+                    console.error("Auto-save failed", e);
+                    addLog("Auto-save failed. Check console.");
+                }
+            }
+
             addLog(`[${currentBot.name}] Calibration Ready!`);
 
         }, 100);
