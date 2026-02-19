@@ -227,6 +227,14 @@ export class RobotDriver {
         await this.syncWrite(40, 1, items); // Address 40, 1 byte
     }
 
+    async setPositionsSync(items: { id: number, position: number }[]) {
+        const syncItems = items.map(item => ({
+            id: item.id,
+            bytes: [item.position & 0xFF, (item.position >> 8) & 0xFF]
+        }));
+        await this.syncWrite(42, 2, syncItems); // Address 42, 2 bytes
+    }
+
     async readPacket(expectedId: number, length: number): Promise<Uint8Array | null> {
         // Simple polling read. In production, need a robust parser buffer.
         // For STS: Header(2) + ID(1) + Len(1) + Error(1) + Params(N) + Checksum(1)
@@ -264,25 +272,13 @@ export class RobotDriver {
             const params = [addr, readLen];
             const packet = this.createPacket(id, INST_READ, params);
 
-            // Clear buffer before write to avoid reading stale data (e.g. write responses)
-            // Aggressively flush until empty
-            try {
-                let flushed = 0;
-                let junk: Uint8Array;
-                do {
-                    junk = await this.connection.read(128, 5); // Short 5ms timeout
-                    flushed += junk.length;
-                    if (flushed > 1000) break; // Safety limit
-                } while (junk.length > 0);
-
-                if (flushed > 0) {
-                    // console.log(`[Driver] Flushed ${flushed} bytes before read`);
-                }
-            } catch (e) { }
+            // Removed aggressive flush for performance. 
+            // The mutex ensures strictly serialized transactions.
+            // If we need flushing, we should do it only on error recovery.
 
             await this.connection.write(packet);
 
-            // Expected response size: 2 header + 1 id + 1 len + 1 err + 2 params + 1 check = 8 bytes
+            // Expected response size: 8 bytes
             const res = await this.readPacket(id, 8);
 
             if (res && res.length >= 8) {

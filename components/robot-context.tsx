@@ -513,6 +513,106 @@ export function RobotProvider({ children }: { children: React.ReactNode }) {
         return () => clearInterval(interval);
     }, [activeRobotId, speedMultiplier, syncControl]);
 
+    // --- LEADER-FOLLOWER SYNC LOOP ---
+    useEffect(() => {
+        if (!isLeaderFollowerActive) return;
+
+        let active = true;
+        let lastUiUpdate = 0;
+
+        const syncLoop = async () => {
+            console.log("Starting Realtime Sync Loop");
+
+            while (active) {
+                const currentRobots = robotsRef.current;
+                if (!leaderRobotId || !followerRobotId) break;
+
+                const leader = currentRobots[leaderRobotId];
+                const follower = currentRobots[followerRobotId];
+
+                if (!leader || !follower || !leader.connected || !follower.connected) {
+                    await new Promise(r => setTimeout(r, 100)); // Wait for connection
+                    continue;
+                }
+
+                // 1. READ LEADER (Fresh Data is Critical for Smoothness)
+                // We cannot rely on the 150ms polling loop. We must read NOW.
+                const freshLeaderVals: number[] = [];
+
+                // Read all 6 joints
+                for (let i = 0; i < 6; i++) {
+                    try {
+                        let pos = await leader.driver.readPosition(i + 1);
+                        if (pos === -1) pos = 0; // Fallback or stick to last?
+
+                        // Normalize Leader Pos to -100..100
+                        // Use Leader's limits if available, or raw
+                        const limit = leader.calibrationLimits[i];
+                        const range = limit.max - limit.min;
+
+                        let angle = 0;
+                        if (range <= 0) {
+                            // If limits invalid, assume full range 0-4095
+                            angle = ((pos / 4095) * 200) - 100;
+                        } else {
+                            const clampedPos = Math.max(limit.min, Math.min(limit.max, pos));
+                            const normalized = (clampedPos - limit.min) / range;
+                            angle = (normalized * 200) - 100;
+                        }
+                        freshLeaderVals.push(angle);
+                    } catch (e) {
+                        freshLeaderVals.push(leader.jointVals[i]); // Fallback to stale
+                    }
+                }
+
+                // 2. WRITE FOLLOWER (Batch)
+                const positionsToWrite: { id: number, position: number }[] = [];
+
+                freshLeaderVals.forEach((val, i) => {
+                    const limit = follower.calibrationLimits[i];
+                    const range = limit.max - limit.min;
+                    const normalized = (val + 100) / 200;
+                    const targetPos = Math.floor(limit.min + (normalized * range));
+                    const safePos = Math.max(0, Math.min(4095, Math.max(limit.min, Math.min(limit.max, targetPos))));
+
+                    positionsToWrite.push({ id: i + 1, position: safePos });
+                });
+
+                if (positionsToWrite.length > 0) {
+                    // This is the "Realtime" action
+                    await follower.driver.setPositionsSync(positionsToWrite).catch(() => { });
+                }
+
+                // 3. THROTTLED UI UPDATE (Optimistic)
+                // Only update React state every ~100ms to avoid render blocking the serial loop
+                const now = Date.now();
+                if (now - lastUiUpdate > 100) {
+                    lastUiUpdate = now;
+                    setRobots(prev => {
+                        return {
+                            ...prev,
+                            [leaderRobotId]: {
+                                ...prev[leaderRobotId],
+                                jointVals: freshLeaderVals
+                            },
+                            [followerRobotId]: {
+                                ...prev[followerRobotId],
+                                jointVals: freshLeaderVals
+                            }
+                        };
+                    });
+                }
+
+                // Yield to event loop to prevent freezing, but run as fast as possible
+                await new Promise(r => setTimeout(r, 0));
+            }
+        };
+
+        syncLoop();
+
+        return () => { active = false; };
+    }, [isLeaderFollowerActive, leaderRobotId, followerRobotId]);
+
     // Keep a ref to latest robots state so the polling interval can read it
     // without being a dependency (which would cause infinite re-creation).
     const robotsRef = useRef(robots);
