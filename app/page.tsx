@@ -42,6 +42,16 @@ export default function Home() {
             Features
           </Link>
           <Link
+            href="#how-it-works"
+            onClick={(e) => {
+              e.preventDefault();
+              document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" });
+            }}
+            className="hover:text-foreground transition-colors"
+          >
+            How it works
+          </Link>
+          <Link
             href="#control"
             onClick={(e) => {
               e.preventDefault();
@@ -115,9 +125,16 @@ export default function Home() {
               Start Controlling Now <ArrowRight className="ml-2 w-4 h-4" />
             </Link>
 
-            {/* <Button size="lg" variant="outline" className="h-12 px-8 text-base border-border bg-background/50 backdrop-blur-sm hover:bg-accent hover:text-accent-foreground">
-              View Documentation
-            </Button> */}
+            <Link
+              href="#how-it-works"
+              onClick={(e) => {
+                e.preventDefault();
+                document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth" });
+              }}
+              className={cn(buttonVariants({ size: "lg", variant: "outline" }), "h-12 px-8 text-base border-border bg-background/50 backdrop-blur-sm hover:bg-accent hover:text-accent-foreground")}
+            >
+              How it works
+            </Link>
           </div>
         </section>
 
@@ -149,6 +166,27 @@ export default function Home() {
             <p className="text-muted-foreground leading-relaxed">
               Multiple control modes available: Leader-Follower, Gamepad, Keyboard, and direct Joint Control.
             </p>
+          </div>
+        </section>
+
+        {/* Video Section */}
+        <section id="how-it-works" className="py-24 px-6 max-w-5xl mx-auto w-full flex flex-col items-center">
+          <div className="text-center mb-12">
+            <h2 className="text-3xl font-bold mb-4 tracking-tight">See It In Action</h2>
+            <p className="text-muted-foreground mt-2">
+              Watch how Hephasbot makes robotics accessible from anywhere.
+            </p>
+          </div>
+          <div className="w-full rounded-2xl overflow-hidden shadow-2xl border border-border/50 bg-card p-2 md:p-4">
+            <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-muted">
+              <iframe
+                src="https://www.youtube.com/embed/ggND3TkgRoY"
+                title="Hephasbot Demo Video"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                allowFullScreen
+                className="absolute top-0 left-0 w-full h-full border-0"
+              ></iframe>
+            </div>
           </div>
         </section>
 
