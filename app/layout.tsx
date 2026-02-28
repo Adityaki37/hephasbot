@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { RobotProvider } from "@/components/robot-context";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -40,6 +41,7 @@ export default async function RootLayout({
         <Providers user={user}>
           {children}
         </Providers>
+        <Analytics />
       </body>
     </html>
   );
