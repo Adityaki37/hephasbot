@@ -26,6 +26,8 @@
 
 ## 🏁 Getting Started
 
+Go to www.hephasbot.com to try it out. If you want to clone it read below.
+
 ### Prerequisites
 
 - **Node.js**: v18+ recommended
