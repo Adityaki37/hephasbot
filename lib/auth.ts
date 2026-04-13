@@ -1,18 +1,27 @@
 import { WorkOS } from '@workos-inc/node';
 import { SignJWT, jwtVerify } from 'jose';
 
-if (!process.env.WORKOS_API_KEY || !process.env.WORKOS_CLIENT_ID) {
-    throw new Error("Missing WORKOS_API_KEY or WORKOS_CLIENT_ID environment variables");
+type SessionUser = Record<string, unknown> & {
+    sessionId?: string;
+};
+
+function getRequiredEnv(name: string) {
+    const value = process.env[name];
+    if (!value) {
+        throw new Error(`Missing ${name} environment variable`);
+    }
+    return value;
 }
 
-export const workos = new WorkOS(process.env.WORKOS_API_KEY);
-export const clientId = process.env.WORKOS_CLIENT_ID;
+const workosApiKey = getRequiredEnv("WORKOS_API_KEY");
+const workosClientId = getRequiredEnv("WORKOS_CLIENT_ID");
+const jwtSecretKey = getRequiredEnv("JWT_SECRET_KEY");
 
-// Use a fallback secret for dev if not provided (DO NOT USE IN PROD)
-const secretKey = process.env.JWT_SECRET_KEY || "new_rotated_secret_key_" + new Date().getFullYear();
-const secret = new TextEncoder().encode(secretKey);
+export const workos = new WorkOS(workosApiKey);
+export const clientId = workosClientId;
+const secret = new TextEncoder().encode(jwtSecretKey);
 
-export async function createSession(user: any, sessionId?: string) {
+export async function createSession(user: SessionUser, sessionId?: string) {
     // Attach sessionId to user object for easy retrieval
     if (sessionId) {
         user.sessionId = sessionId;
@@ -28,8 +37,8 @@ export async function createSession(user: any, sessionId?: string) {
 export async function getSession(token: string) {
     try {
         const { payload } = await jwtVerify(token, secret);
-        return payload.user;
-    } catch (e) {
+        return payload.user as SessionUser;
+    } catch {
         return null;
     }
 }

@@ -38,8 +38,8 @@ Go to www.hephasbot.com to try it out. If you want to clone it read below.
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/Adityaki37/Hephas.git
-    cd Hephas/hephasbot
+    git clone https://github.com/Adityaki37/hephasbot.git
+    cd hephasbot
     ```
 
 2.  **Install dependencies**:
@@ -47,7 +47,10 @@ Go to www.hephasbot.com to try it out. If you want to clone it read below.
     bun install
     ```
 
-3.  **Run the App**:
+3.  **Configure environment variables**:
+    Create `.env.local` from `.env.local.example`, then fill in `NEXT_PUBLIC_CONVEX_URL`, `WORKOS_CLIENT_ID`, `WORKOS_API_KEY`, and `JWT_SECRET_KEY` before starting the app.
+
+4.  **Run the App**:
     ```bash
     bun run dev
     ```
